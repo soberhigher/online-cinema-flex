@@ -1,133 +1,152 @@
 # Online Cinema FLEX
 
-FastAPI backend for six FLEX features: accounts/authentication, movie catalog, favorites, cart, orders, and Stripe test-mode payments. Full-time-only workflow requirements and profile/avatar storage, MinIO, comments, reactions, ratings, recommendations, refunds, streaming, and EC2 are out of scope.
+Backend for an online cinema (Mate Academy FLEX track): accounts, movie catalog, favorites,
+cart, orders and Stripe payments in test mode.
 
-## Stack and architecture
+Not included (full-time track only): user profiles and avatars, MinIO, comments, likes,
+ratings, recommendations, refunds, streaming, EC2 deployment.
 
-- Python 3.12, Poetry, FastAPI, Pydantic v2
-- SQLAlchemy 2 async, Alembic, PostgreSQL 16
-- JWT access/refresh tokens, Argon2 passwords, opaque activation/reset tokens
-- Celery + Redis for email and expired activation-token cleanup; MailHog for local SMTP
-- Stripe Checkout in test mode; signed webhook processing
-- `app/core`, `models`, `schemas`, `services`, `api/routes`, and `tasks`; PostgreSQL-backed integration tests
+**Stack:** Python 3.12, FastAPI, SQLAlchemy 2 (async) + Alembic, PostgreSQL 16, Celery + Redis,
+MailHog, Stripe, Poetry.
 
-## Run locally
+```
+app/
+  api/routes/   HTTP layer
+  services/     business logic
+  models/       SQLAlchemy models
+  schemas/      Pydantic schemas
+  tasks/        Celery: emails, cleanup of expired activation tokens
+  core/         settings, database, JWT/passwords, rate limiting
+migrations/     Alembic
+tests/          unit, integration (real PostgreSQL), functional
+```
 
-1. Copy `.env.example` to `.env`. Replace all placeholder values locally. `JWT_SECRET_KEY` must be at least 32 random characters (the API will not start otherwise); also set a Stripe **test** secret and webhook signing secret; never commit `.env`.
-2. Start the stack:
-
-   ```sh
-   docker compose up -d --build
-   ```
-
-   The API container applies Alembic migrations before starting Uvicorn. PostgreSQL, Redis, Celery worker/beat, and MailHog are also started.
-3. Check readiness:
-
-   ```sh
-   curl http://localhost:8000/health
-   ```
-
-   Expected: `{"status":"ok","database":"ok"}`. API: `http://localhost:8000`; MailHog UI: `http://localhost:8025`.
-4. Apply migrations manually when needed: `docker compose exec api poetry run alembic upgrade head`.
-
-5. Create an administrator and demo catalog data:
-
-   ```sh
-   docker compose exec api poetry run python -m app.cli create-user --email admin@example.com --password "ChangeMe-Admin1!" --role ADMIN
-   docker compose exec api poetry run python -m app.cli seed-catalog
-   ```
-
-   `create-user` creates an already active account (roles `USER`, `MODERATOR`, `ADMIN`) and enforces the password policy. `seed-catalog` is idempotent: it adds genres, stars, directors, certifications and 7 movies, skipping movies that already exist.
-
-The app and integration tests use PostgreSQL; SQLite is not supported. Compose's `db` hostname is for container-to-container access.
-
-## Authentication and API documentation
-
-All business routes are under `/api/v1`. Register with `POST /api/v1/auth/register`, activate using the link delivered to MailHog, then use `POST /api/v1/auth/login` to receive access and refresh JWTs. Send protected requests with `Authorization: Bearer <access_token>`. `POST /refresh` returns a new access token and a new refresh token (the old one stops working; reusing it ends all sessions of the account). `POST /logout` revokes the refresh token. Changing or resetting the password also invalidates earlier access tokens. Password reset mail contains a one-time token for `POST /api/v1/auth/reset-password`.
-
-Login, registration, password reset and activation-email endpoints, as well as the HTTP Basic prompt on `/docs`, are rate limited per client IP and answer `429` with `Retry-After` when the limit is hit. The counter lives in process memory, which fits the single Uvicorn process started by Compose.
-
-`/docs` and `/openapi.json` are not public. Open `http://localhost:8000/docs` in a browser: it shows a login prompt (HTTP Basic) where you enter the **email and password of an active account**. API clients may instead send `Authorization: Bearer <access_token>`. Inside Swagger, click **Authorize** and log in with the same email (as `username`) and password to call protected endpoints; every endpoint has a summary and description. `/health` and the explicitly public authentication routes are unauthenticated. Moderator/admin routes are under `/api/v1/catalog-admin` and `/api/v1/admin`; `ADMIN` inherits moderator permissions. The first administrator is created with `python -m app.cli create-user ... --role ADMIN` (see *Run locally*); further roles can then be granted with `PATCH /api/v1/admin/users/{user_id}/group`.
-
-### Main route groups
-
-| Route group | Behavior |
-| --- | --- |
-| `/api/v1/auth` | Register, activate/resend, login, refresh/logout, change/forgot/reset password |
-| `/api/v1/movies` | Public movie search, filters, sort, pagination, detail, genres |
-| `/api/v1/catalog-admin` | Moderator/admin movie and reference-data CRUD |
-| `/api/v1/admin` | ADMIN: list users (`email` filter), change a user's group, activate a user. MODERATOR+: all orders and payments (filters `user_id`, `status`, `date_from`, `date_to`, pagination) and any user's cart |
-| `/api/v1/favorites` | Add/remove/list the caller's favorite movies |
-| `/api/v1/cart` | Read, add/remove items, clear cart |
-| `/api/v1/orders` | Create/list/read/cancel pending orders; prices are snapshotted |
-| `/api/v1/payments` | Payment history, Stripe Checkout session, signed webhook, success/cancel redirect pages |
-
-Movie deletion returns `409` when a cart or order references the movie. Duplicate favorite/cart entries and already purchased/pending items return `409`. Creating an order rechecks cart contents and prices; unavailable items are returned with reasons, and an all-excluded cart returns a structured `409` detail.
-
-### Example requests
+## Running locally
 
 ```sh
-# Register, then open the activation link from MailHog (http://localhost:8025)
-curl -X POST localhost:8000/api/v1/auth/register -H "Content-Type: application/json"   -d '{"email": "me@example.com", "password": "StrongPassword9!"}'
+cp .env.example .env    # then edit it, see below
+docker compose up -d --build
+curl localhost:8000/health    # {"status":"ok","database":"ok"}
+```
 
-# Log in and keep the access token
-TOKEN=$(curl -s -X POST localhost:8000/api/v1/auth/login -H "Content-Type: application/json"   -d '{"email": "me@example.com", "password": "StrongPassword9!"}' | jq -r .access_token)
+In `.env` set at least:
 
-# Search the catalog and list genres with movie counts
+- `JWT_SECRET_KEY` — 32+ random characters. The API refuses to start with the placeholder.
+- `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` — **test mode** keys.
+
+Compose starts the API (it runs `alembic upgrade head` first), PostgreSQL, Redis, a Celery
+worker and beat, and MailHog. Activation and password reset emails show up in MailHog at
+http://localhost:8025.
+
+Create an admin and some demo movies:
+
+```sh
+docker compose exec api poetry run python -m app.cli create-user --email admin@example.com --password "ChangeMe-Admin1!" --role ADMIN
+docker compose exec api poetry run python -m app.cli seed-catalog
+```
+
+`seed-catalog` can be run again safely, it skips movies that already exist.
+
+## API
+
+Everything lives under `/api/v1`. Swagger is at http://localhost:8000/docs, but it is not
+public: the browser asks for the email and password of an active account. Inside Swagger use
+**Authorize** with the same credentials.
+
+| Prefix | What it does | Access |
+| --- | --- | --- |
+| `/auth` | register, activate, login, refresh, logout, change/forgot/reset password | public |
+| `/movies` | list with search, filters, sorting, pagination; movie details; genres | public |
+| `/favorites` | add, remove, list (same filters as `/movies`) | user |
+| `/cart` | view, add, remove, clear | user |
+| `/orders` | create from cart, list, details, cancel | user |
+| `/payments` | history, start Stripe Checkout, webhook, success/cancel pages | user |
+| `/catalog-admin` | CRUD for movies, genres, stars, directors, certifications | moderator |
+| `/admin/orders`, `/admin/payments`, `/admin/carts/{id}` | all orders and payments with filters, any user's cart | moderator |
+| `/admin/users` | list users, change group, activate manually | admin |
+
+Admins have all moderator permissions.
+
+### Auth details
+
+- Passwords: 12–128 characters, upper- and lowercase letters, a digit and a special character.
+  Stored with Argon2.
+- Access token lives 30 minutes, refresh token 14 days. Every `/refresh` returns a new refresh
+  token and revokes the old one. If a revoked refresh token is used again, all sessions of the
+  account are closed.
+- Changing or resetting the password revokes refresh tokens and makes older access tokens invalid.
+- Activation and reset tokens are random strings; only their SHA-256 hashes are stored.
+- Login, registration, password reset, resending activation emails and the `/docs` password
+  prompt are rate limited per IP (`429` + `Retry-After`). The counter is kept in memory, which
+  is fine for the single Uvicorn process Compose runs.
+
+### Orders and payments
+
+- An order stores the price of every movie at the moment it was created.
+- When an order is created, movies that were already bought or are in another pending order
+  are skipped and returned in `excluded`. If nothing is left, the response is `409`.
+- Checkout fails with `409` if prices changed since the order was made — create a new order.
+  Calling checkout again while the previous Stripe session is still open returns that session.
+- The webhook checks the Stripe signature, the order owner and the amount. Events are processed
+  once (by Stripe event id). An expired or failed session cancels the order; an expired *older*
+  session is ignored if a newer one exists.
+- If the customer pays for an order that was canceled in the meantime, the payment is still
+  recorded and the order becomes paid.
+- If the paid amount does not match the order, the event is logged and acknowledged without
+  touching the order, so it can be checked by hand.
+
+### Example
+
+```sh
+curl -X POST localhost:8000/api/v1/auth/register -H "Content-Type: application/json" \
+  -d '{"email": "me@example.com", "password": "StrongPassword9!"}'
+# open the activation link from MailHog, then:
+TOKEN=$(curl -s -X POST localhost:8000/api/v1/auth/login -H "Content-Type: application/json" \
+  -d '{"email": "me@example.com", "password": "StrongPassword9!"}' | jq -r .access_token)
+
 curl "localhost:8000/api/v1/movies/?search=nolan&sort=imdb&descending=true&per_page=5"
-curl localhost:8000/api/v1/movies/genres
-
-# Cart -> order -> Stripe checkout -> payment history
 curl -X POST localhost:8000/api/v1/cart/items/<movie_id> -H "Authorization: Bearer $TOKEN"
 curl -X POST localhost:8000/api/v1/orders -H "Authorization: Bearer $TOKEN"
 curl -X POST localhost:8000/api/v1/payments/checkout/<order_id> -H "Authorization: Bearer $TOKEN"
-curl localhost:8000/api/v1/payments -H "Authorization: Bearer $TOKEN"
-
-# Moderator: paid orders of one user in October 2026
-curl "localhost:8000/api/v1/admin/orders?user_id=<id>&status=paid&date_from=2026-10-01T00:00:00Z&date_to=2026-10-31T23:59:59Z"   -H "Authorization: Bearer $MODERATOR_TOKEN"
 ```
 
-## Differences from the reference database schema
-
-| Difference | Reason |
-| --- | --- |
-| UUID primary keys for users, movies, carts, orders and payments (integers for reference tables) | IDs appear in URLs and webhooks; UUIDs are not enumerable and can be generated before insert. |
-| Activation and password-reset tokens are stored as SHA-256 hashes; refresh tokens are tracked by `jti` | A leaked database does not expose usable tokens. |
-| `PaymentItem.movie_id` instead of a link to `OrderItem` | A payment item stays meaningful on its own, and the order/movie pair is still unique per order. |
-| `Movie.certification_id` is nullable | Movies can be created before their certification is known; deletion of a used certification is still blocked. |
-| No `UserProfile` table and no `updated_at` columns | The FLEX scope has no profile endpoints; audit history is covered by `created_at` and payment records. |
-
-## Stripe test mode
-
-Configure only Stripe test-mode credentials. Start a local forwarding listener, for example:
+## Stripe webhooks locally
 
 ```sh
 stripe listen --forward-to localhost:8000/api/v1/payments/webhook
 ```
 
-Set `STRIPE_WEBHOOK_SECRET` to the listener's signing secret. `STRIPE_SUCCESS_URL` and `STRIPE_CANCEL_URL` default to `/api/v1/payments/success` and `/cancel`, which show the result to the customer (the cancel page suggests another payment method). A successful payment for an order that was canceled meanwhile is still recorded and the order marked paid, so no captured money is lost. Checkout uses Stripe's card payment method. Create an order, call `POST /api/v1/payments/checkout/{order_id}`, then complete/cancel Checkout in Stripe's test environment. The webhook verifies the raw-body signature, checks order owner/amount, and processes duplicate events idempotently. If Stripe reports `checkout.session.completed` while `payment_status` is still `unpaid`, the order remains pending until an `async_payment_succeeded` event arrives. Automated tests mock Checkout session creation; signed webhook transitions and failure boundaries run against PostgreSQL. No real card charges are used.
+Put the signing secret it prints into `STRIPE_WEBHOOK_SECRET`. Pay with Stripe's test cards.
 
-## Tests and quality checks
+## Tests
 
-Start Compose first, then run from the project directory:
-
-```sh
-poetry install --with dev
-poetry run ruff check .
-poetry run ruff format --check .
-poetry run mypy app
-poetry run pytest --cov=app --cov-report=term-missing
-```
-
-Integration tests use the dedicated `cinema_test` database and `TEST_DATABASE_URL` (default `postgresql+asyncpg://cinema:changeme@localhost:5432/cinema_test`). They reset only that database's `public` schema before applying migrations; do not point this variable at a database containing user data. Scenarios cover auth expiry/reuse and password revocation; catalog multi-field search, filters, sorting, pagination, role access and reference deletion; favorite isolation; cart/order ownership, stale prices and concurrent order creation; and Stripe signatures, wrong owner/amount, cancellation, delayed success and event idempotency. The CI PostgreSQL service provides the dedicated test database.
-
-Before running integration tests locally against the Compose database, create the dedicated test database once:
+Tests need PostgreSQL. With Compose running, create the test database once:
 
 ```sh
 docker compose exec db createdb -U cinema cinema_test
 ```
 
-## Branches and commits
+Then:
 
-Feature branches: `feat/project-foundation`, `feat/accounts-auth`, `feat/catalog`, `feat/favorites`, `feat/cart`, `feat/orders`, `feat/stripe-payments`, and `chore/docs-ci`. Use small conventional commits (`feat: ...`, `test: ...`, `docs: ...`, `ci: ...`). Do not commit local secrets, `.env`, coverage output, or database dumps.
+```sh
+poetry install --with dev
+poetry run ruff check . && poetry run ruff format --check .
+poetry run mypy app
+poetry run pytest --cov=app
+```
 
+The database is taken from `TEST_DATABASE_URL`
+(default `postgresql+asyncpg://cinema:changeme@localhost:5432/cinema_test`). **Its `public`
+schema is dropped before every test**, so never point it at a real database. Stripe calls are
+mocked; webhooks are signed the same way Stripe does it. CI runs the same checks and requires
+80% coverage.
+
+## Differences from the reference schema
+
+- UUID primary keys for users, movies, carts, orders and payments, so ids in URLs can't be
+  guessed. Reference tables (genres etc.) keep integer ids.
+- Activation/reset tokens are stored as hashes; refresh tokens are tracked by `jti`.
+- `PaymentItem` points to the movie, not to `OrderItem`.
+- `Movie.certification_id` is nullable.
+- No `UserProfile` table and no `updated_at` columns: profiles are out of FLEX scope.
+- `User.password_changed_at` is used to invalidate access tokens.

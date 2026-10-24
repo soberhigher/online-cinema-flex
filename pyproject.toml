@@ -2,7 +2,7 @@
 name = "online-cinema-flex"
 version = "0.1.0"
 description = "Online Cinema FLEX backend: accounts/auth, catalog, favorites, cart, orders, Stripe test payments"
-authors = ["FLEX Student"]
+authors = ["Danylo Pylypenko"]
 readme = "README.md"
 packages = [{ include = "app" }]
 
