@@ -2,18 +2,10 @@ from app.core.database import Base
 from app.models.accounts import ActivationToken, PasswordResetToken, RefreshToken, User, UserGroup
 from app.models.catalog import Certification, Director, Genre, Movie, Star
 from app.models.favorites import Favorite
+from app.models.purchases import Cart, CartItem, Order, OrderItem
 
 __all__ = [
-    "ActivationToken",
-    "Base",
-    "Certification",
-    "Director",
-    "Favorite",
-    "Genre",
-    "Movie",
-    "PasswordResetToken",
-    "RefreshToken",
-    "Star",
-    "User",
-    "UserGroup",
+    "ActivationToken", "Base", "Cart", "CartItem", "Certification", "Director", "Favorite",
+    "Genre", "Movie", "Order", "OrderItem", "PasswordResetToken", "RefreshToken", "Star",
+    "User", "UserGroup",
 ]
