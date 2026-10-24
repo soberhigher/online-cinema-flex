@@ -19,6 +19,7 @@ router = APIRouter(prefix="/api/v1/favorites", tags=["favorites"])
 
 @router.post(
     "/{movie_id}",
+    summary="Add a favorite",
     status_code=status.HTTP_201_CREATED,
     responses={
         401: {"description": "Authentication required"},
@@ -32,6 +33,7 @@ async def add_favorite(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> dict[str, str]:
+    """Adds a movie to the caller's favorites. Adding it twice returns 409."""
     movie = await session.get(Movie, movie_id)
     if movie is None:
         raise HTTPException(status_code=404, detail="Movie not found")
@@ -51,6 +53,7 @@ async def add_favorite(
 
 @router.delete(
     "/{movie_id}",
+    summary="Remove a favorite",
     status_code=status.HTTP_204_NO_CONTENT,
     responses={
         401: {"description": "Authentication required"},
@@ -63,6 +66,7 @@ async def remove_favorite(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> None:
+    """Removes a movie from the caller's favorites."""
     favorite = await session.scalar(
         select(Favorite).where(Favorite.user_id == user.id, Favorite.movie_id == movie_id)
     )
@@ -74,6 +78,7 @@ async def remove_favorite(
 
 @router.get(
     "",
+    summary="List favorites",
     response_model=MoviePage,
     responses={
         401: {"description": "Authentication required"},
@@ -83,15 +88,23 @@ async def remove_favorite(
 async def favorites(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(get_current_user)],
-    page: Annotated[int, Query(ge=1)] = 1,
-    per_page: Annotated[int, Query(ge=1, le=100)] = 20,
-    search: str | None = None,
-    genre_id: int | None = None,
-    year: int | None = None,
-    min_imdb: Annotated[float | None, Query(ge=0, le=10)] = None,
-    sort: str = "name",
-    descending: bool = False,
+    page: Annotated[int, Query(ge=1, description="Page number, starting at 1")] = 1,
+    per_page: Annotated[int, Query(ge=1, le=100, description="Items per page (1-100)")] = 20,
+    search: Annotated[
+        str | None,
+        Query(description="Substring of title, description, genre, star or director name"),
+    ] = None,
+    genre_id: Annotated[int | None, Query(description="Only movies of this genre")] = None,
+    year: Annotated[int | None, Query(description="Exact release year")] = None,
+    min_imdb: Annotated[float | None, Query(ge=0, le=10, description="Minimum IMDb rating")] = None,
+    sort: Annotated[
+        str, Query(description="Sort field: name, year, imdb, price or votes")
+    ] = "name",
+    descending: Annotated[bool, Query(description="Sort in descending order")] = False,
 ) -> dict[str, object]:
+    """The caller's favorite movies with the same search, filters, sorting and pagination as the
+    public catalog.
+    """
     if sort not in {"name", "year", "imdb", "price", "votes"}:
         raise HTTPException(status_code=422, detail="Unsupported sort field")
     return await CatalogService(session).list_movies(

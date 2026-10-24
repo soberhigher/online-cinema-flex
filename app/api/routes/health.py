@@ -7,7 +7,7 @@ from app.core.database import get_session
 router = APIRouter(tags=["health"])
 
 
-@router.get("/health")
+@router.get("/health", summary="Health check")
 async def health(session: AsyncSession = Depends(get_session)) -> dict[str, str]:
     """Liveness/readiness probe. Verifies the database connection."""
     try:
