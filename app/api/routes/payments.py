@@ -1,7 +1,7 @@
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user
@@ -13,7 +13,6 @@ from app.schemas.payments import (
     PaymentResultResponse,
     WebhookResponse,
 )
-from app.services.auth import AuthError
 from app.services.payments import PaymentService
 
 router = APIRouter(prefix="/api/v1/payments", tags=["payments"])
@@ -74,10 +73,7 @@ async def checkout(
     """Creates a Stripe Checkout session for a pending order and returns its URL. Returns 409 if
     the order is not pending or movie prices changed since ordering (create a new order then).
     """
-    try:
-        return await PaymentService(session).checkout(user.id, order_id)
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return await PaymentService(session).checkout(user.id, order_id)
 
 
 @router.post(
@@ -100,7 +96,4 @@ async def webhook(
     idempotent by Stripe event id. Not for direct use.
     """
     payload = await request.body()
-    try:
-        return await PaymentService(session).webhook(payload, signature)
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return await PaymentService(session).webhook(payload, signature)

@@ -2,12 +2,13 @@ import json
 import logging
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.api.dependencies import get_docs_user
 from app.api.routes import admin, auth, catalog, favorites, health, payments, purchases
 from app.core.config import get_settings
+from app.services.errors import ServiceError
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -27,6 +28,11 @@ def create_app() -> FastAPI:
         redoc_url=None,
         openapi_url=None,
     )
+
+    @app.exception_handler(ServiceError)
+    async def service_error(request: Request, exc: ServiceError) -> JSONResponse:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
     app.include_router(health.router)
     app.include_router(auth.router)
     app.include_router(catalog.router)

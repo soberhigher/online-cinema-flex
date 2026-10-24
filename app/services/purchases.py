@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models.catalog import Movie
 from app.models.purchases import Cart, CartItem, Order, OrderItem, OrderStatus
-from app.services.auth import AuthError
+from app.services.errors import ServiceError
 
 
 class PurchaseService:
@@ -59,13 +59,13 @@ class PurchaseService:
     async def add_to_cart(self, user_id: UUID, movie_id: UUID) -> dict[str, str]:
         movie = await self.session.get(Movie, movie_id)
         if movie is None:
-            raise AuthError(404, "Movie not found")
+            raise ServiceError(404, "Movie not found")
         if await self._owned_or_pending(user_id, movie_id):
-            raise AuthError(409, "Movie is already purchased or pending payment")
+            raise ServiceError(409, "Movie is already purchased or pending payment")
         cart = await self._cart(user_id, create=True, lock=True)
         assert cart is not None
         if any(item.movie_id == movie_id for item in cart.items):
-            raise AuthError(409, "Movie is already in the cart")
+            raise ServiceError(409, "Movie is already in the cart")
         cart.items.append(CartItem(movie_id=movie_id, movie=movie))
         await self.session.commit()
         return {"message": "Added to cart"}
@@ -78,7 +78,7 @@ class PurchaseService:
             else next((entry for entry in cart.items if entry.movie_id == movie_id), None)
         )
         if item is None:
-            raise AuthError(404, "Movie is not in the cart")
+            raise ServiceError(404, "Movie is not in the cart")
         await self.session.delete(item)
         await self.session.commit()
 
@@ -92,7 +92,7 @@ class PurchaseService:
     async def create_order(self, user_id: UUID) -> dict[str, object]:
         cart = await self._cart(user_id, lock=True)
         if cart is None or not cart.items:
-            raise AuthError(409, "Cart is empty")
+            raise ServiceError(409, "Cart is empty")
         eligible: list[CartItem] = []
         excluded: list[dict[str, str]] = []
         for item in cart.items:
@@ -101,7 +101,7 @@ class PurchaseService:
             else:
                 eligible.append(item)
         if not eligible:
-            raise AuthError(409, {"excluded": excluded})
+            raise ServiceError(409, {"excluded": excluded})
         total = sum((item.movie.price for item in eligible), Decimal("0.00"))
         order = Order(user_id=user_id, status=OrderStatus.PENDING, total_amount=total)
         order.items = [
@@ -141,7 +141,7 @@ class PurchaseService:
             .where(Order.id == order_id, Order.user_id == user_id)
         )
         if order is None:
-            raise AuthError(404, "Order not found")
+            raise ServiceError(404, "Order not found")
         return self._order_data(order)
 
     @staticmethod
@@ -175,9 +175,9 @@ class PurchaseService:
             select(Order).where(Order.id == order_id, Order.user_id == user_id).with_for_update()
         )
         if order is None:
-            raise AuthError(404, "Order not found")
+            raise ServiceError(404, "Order not found")
         if order.status != OrderStatus.PENDING:
-            raise AuthError(409, "Only pending orders can be canceled")
+            raise ServiceError(409, "Only pending orders can be canceled")
         order.status = OrderStatus.CANCELED
         await self.session.commit()
         return {"id": order.id, "status": order.status}

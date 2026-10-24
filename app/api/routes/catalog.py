@@ -16,7 +16,6 @@ from app.schemas.catalog import (
     ReferenceInput,
     ReferenceOut,
 )
-from app.services.auth import AuthError
 from app.services.catalog import CatalogService
 
 router = APIRouter(tags=["movie catalog"])
@@ -25,10 +24,6 @@ admin = APIRouter(prefix="/api/v1/catalog-admin", tags=["catalog administration"
 
 async def service(session: Annotated[AsyncSession, Depends(get_session)]) -> CatalogService:
     return CatalogService(session)
-
-
-def translate(exc: AuthError) -> HTTPException:
-    return HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 
 AUTH_ERRORS: dict[int | str, dict[str, Any]] = {
@@ -120,12 +115,9 @@ async def genre_movies(
     """Public paginated, sortable list of the movies in one genre. Unknown genre returns 404."""
     if sort not in SORT_FIELDS:
         raise HTTPException(status_code=422, detail="Unsupported sort field")
-    try:
-        return await service.genre_movies(
-            genre_id, page=page, per_page=per_page, sort=sort, descending=descending
-        )
-    except AuthError as exc:
-        raise translate(exc) from exc
+    return await service.genre_movies(
+        genre_id, page=page, per_page=per_page, sort=sort, descending=descending
+    )
 
 
 @router.get(
@@ -138,10 +130,7 @@ async def movie_detail(
     movie_id: UUID, service: Annotated[CatalogService, Depends(service)]
 ) -> Movie:
     """Public details of one movie with its genres, stars, directors and certification id."""
-    try:
-        return await service.get_movie(movie_id)
-    except AuthError as exc:
-        raise translate(exc) from exc
+    return await service.get_movie(movie_id)
 
 
 @admin.post(
@@ -159,10 +148,7 @@ async def create_movie(
     """MODERATOR+. Creates a movie; referenced genre, star, director and certification ids must
     exist. Name, year and duration must be unique together.
     """
-    try:
-        return await service.create_movie(data)
-    except AuthError as exc:
-        raise translate(exc) from exc
+    return await service.create_movie(data)
 
 
 @admin.put(
@@ -177,10 +163,7 @@ async def update_movie(
     """MODERATOR+. Replaces all fields of a movie. Price changes do not affect existing orders:
     order items keep the price at order time.
     """
-    try:
-        return await service.update_movie(movie_id, data)
-    except AuthError as exc:
-        raise translate(exc) from exc
+    return await service.update_movie(movie_id, data)
 
 
 @admin.delete(
@@ -195,10 +178,7 @@ async def delete_movie(
     _: Annotated[User, Depends(require_roles(UserGroupEnum.MODERATOR))],
 ) -> None:
     """MODERATOR+. Deletes a movie unless it is in a cart or an order (409)."""
-    try:
-        await service.delete_movie(movie_id)
-    except AuthError as exc:
-        raise translate(exc) from exc
+    await service.delete_movie(movie_id)
 
 
 @admin.get(
@@ -245,10 +225,7 @@ async def create_reference(
     """MODERATOR+. Creates a genre, star, director or certification (`resource` is genres, stars,
     directors or certifications). Duplicate names return 409.
     """
-    try:
-        return await service.create_reference(reference_model(resource), data.name)
-    except AuthError as exc:
-        raise translate(exc) from exc
+    return await service.create_reference(reference_model(resource), data.name)
 
 
 @admin.put(
@@ -265,10 +242,7 @@ async def update_reference(
     _: Annotated[User, Depends(require_roles(UserGroupEnum.MODERATOR))],
 ) -> object:
     """MODERATOR+. Renames a genre, star, director or certification."""
-    try:
-        return await service.update_reference(reference_model(resource), object_id, data.name)
-    except AuthError as exc:
-        raise translate(exc) from exc
+    return await service.update_reference(reference_model(resource), object_id, data.name)
 
 
 @admin.get(
@@ -299,7 +273,4 @@ async def delete_reference(
     _: Annotated[User, Depends(require_roles(UserGroupEnum.MODERATOR))],
 ) -> None:
     """MODERATOR+. Deletes a reference item unless movies use it (409)."""
-    try:
-        await service.delete_reference(reference_model(resource), object_id)
-    except AuthError as exc:
-        raise translate(exc) from exc
+    await service.delete_reference(reference_model(resource), object_id)

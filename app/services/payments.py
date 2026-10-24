@@ -14,7 +14,7 @@ from app.core.config import get_settings
 from app.models.accounts import User
 from app.models.payments import Payment, PaymentItem, PaymentStatus
 from app.models.purchases import Order, OrderItem, OrderStatus
-from app.services.auth import AuthError
+from app.services.errors import ServiceError
 from app.tasks.auth_tasks import send_email
 
 logger = logging.getLogger(__name__)
@@ -60,13 +60,13 @@ class PaymentService:
             .where(Order.id == order_id, Order.user_id == user_id)
         )
         if order is None:
-            raise AuthError(404, "Order not found")
+            raise ServiceError(404, "Order not found")
         if order.status != OrderStatus.PENDING or not order.items:
-            raise AuthError(409, "Only non-empty pending orders can be checked out")
+            raise ServiceError(409, "Only non-empty pending orders can be checked out")
         current_total = sum((item.movie.price for item in order.items), Decimal("0.00"))
         snapshot_total = sum((item.price_at_order for item in order.items), Decimal("0.00"))
         if current_total != snapshot_total or current_total != order.total_amount:
-            raise AuthError(409, "Order prices changed; create a new order")
+            raise ServiceError(409, "Order prices changed; create a new order")
         stripe.api_key = self.settings.stripe_secret_key
         session = await asyncio.to_thread(
             stripe.checkout.Session.create,
@@ -99,7 +99,7 @@ class PaymentService:
                 payload, signature, self.settings.stripe_webhook_secret
             )
         except (ValueError, stripe.SignatureVerificationError) as exc:
-            raise AuthError(400, "Invalid Stripe webhook signature or payload") from exc
+            raise ServiceError(400, "Invalid Stripe webhook signature or payload") from exc
         event_id = str(event["id"])
         existing = await self.session.scalar(
             select(Payment).where(Payment.stripe_event_id == event_id)
@@ -120,7 +120,7 @@ class PaymentService:
             order_id = UUID(str(metadata["order_id"]))
             user_id = UUID(str(metadata["user_id"]))
         except (KeyError, ValueError, TypeError) as exc:
-            raise AuthError(400, "Stripe session has invalid order metadata") from exc
+            raise ServiceError(400, "Stripe session has invalid order metadata") from exc
         order = await self.session.scalar(
             select(Order)
             .options(selectinload(Order.items).selectinload(OrderItem.movie))
@@ -128,7 +128,7 @@ class PaymentService:
             .with_for_update()
         )
         if order is None or order.user_id != user_id:
-            raise AuthError(400, "Stripe session references an invalid order owner")
+            raise ServiceError(400, "Stripe session references an invalid order owner")
         is_paid_event = event_type in {
             "checkout.session.completed",
             "checkout.session.async_payment_succeeded",
@@ -160,7 +160,7 @@ class PaymentService:
             return {"received": True, "pending": True}
         expected_cents = int(order.total_amount * 100)
         if is_success and session_data.get("amount_total") != expected_cents:
-            raise AuthError(400, "Stripe amount does not match order total")
+            raise ServiceError(400, "Stripe amount does not match order total")
         if existing_payment is not None:
             # A canceled attempt was charged after all: upgrade its record.
             payment = existing_payment
@@ -195,7 +195,7 @@ class PaymentService:
             )
             if duplicate is not None:
                 return {"received": True, "duplicate": True}
-            raise AuthError(409, "Payment event conflicts with existing payment") from exc
+            raise ServiceError(409, "Payment event conflicts with existing payment") from exc
         if is_success:
             user = await self.session.get(User, user_id)
             if user is not None:

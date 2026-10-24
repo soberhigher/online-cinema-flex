@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
 from app.models.accounts import User, UserGroupEnum
-from app.services.auth import AuthError, AuthService
+from app.services.auth import AuthService
+from app.services.errors import ServiceError
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
 docs_basic_scheme = HTTPBasic(auto_error=False, realm="Online Cinema API docs")
@@ -20,10 +21,7 @@ async def get_auth_service(session: AsyncSession = Depends(get_session)) -> Auth
 async def get_current_user(
     token: str = Depends(oauth2_scheme), service: AuthService = Depends(get_auth_service)
 ) -> User:
-    try:
-        return await service.current_user(token)
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return await service.current_user(token)
 
 
 def require_roles(*roles: UserGroupEnum) -> Callable[..., Any]:
@@ -52,7 +50,7 @@ async def get_docs_user(
     if authorization.lower().startswith("bearer "):
         try:
             return await service.current_user(authorization[7:].strip())
-        except AuthError:
+        except ServiceError:
             pass
     elif credentials is not None:
         user = await service.authenticate(credentials.username, credentials.password)

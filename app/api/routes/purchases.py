@@ -1,14 +1,13 @@
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user
 from app.core.database import get_session
 from app.models.accounts import User
 from app.schemas.purchases import CartResponse, OrderCreationResponse, OrderResponse
-from app.services.auth import AuthError
 from app.services.purchases import PurchaseService
 
 cart_router = APIRouter(prefix="/api/v1/cart", tags=["shopping cart"])
@@ -45,10 +44,7 @@ async def add_item(
     """Adds a movie to the caller's cart. Movies already in the cart, already purchased or in a
     pending order return 409.
     """
-    try:
-        return await PurchaseService(session).add_to_cart(user.id, movie_id)
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return await PurchaseService(session).add_to_cart(user.id, movie_id)
 
 
 @cart_router.delete(
@@ -63,10 +59,7 @@ async def remove_item(
     user: Annotated[User, Depends(get_current_user)],
 ) -> None:
     """Removes one movie from the caller's cart."""
-    try:
-        await PurchaseService(session).remove_from_cart(user.id, movie_id)
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    await PurchaseService(session).remove_from_cart(user.id, movie_id)
 
 
 @cart_router.delete(
@@ -95,10 +88,7 @@ async def create_order(
     or are pending meanwhile are excluded and listed with a reason; if nothing is left, returns
     409 with the exclusions.
     """
-    try:
-        return await PurchaseService(session).create_order(user.id)
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return await PurchaseService(session).create_order(user.id)
 
 
 @order_router.get(
@@ -124,10 +114,7 @@ async def get_order(
     user: Annotated[User, Depends(get_current_user)],
 ) -> dict[str, object]:
     """One of the caller's orders."""
-    try:
-        return await PurchaseService(session).order(user.id, order_id)
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return await PurchaseService(session).order(user.id, order_id)
 
 
 @order_router.post("/{order_id}/cancel", summary="Cancel an order", responses=AUTH_RESPONSES)
@@ -137,7 +124,4 @@ async def cancel_order(
     user: Annotated[User, Depends(get_current_user)],
 ) -> dict[str, object]:
     """Cancels a pending order. Paid or already canceled orders return 409."""
-    try:
-        return await PurchaseService(session).cancel_order(user.id, order_id)
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return await PurchaseService(session).cancel_order(user.id, order_id)

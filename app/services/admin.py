@@ -9,8 +9,8 @@ from sqlalchemy.orm import selectinload
 from app.models.accounts import ActivationToken, User, UserGroup, UserGroupEnum
 from app.models.payments import Payment, PaymentItem
 from app.models.purchases import Order, OrderItem
-from app.services.auth import AuthError
 from app.services.catalog import like_pattern
+from app.services.errors import ServiceError
 from app.services.payments import payment_data
 from app.services.purchases import PurchaseService
 
@@ -34,7 +34,7 @@ class AdminService:
             select(User).options(selectinload(User.group)).where(User.id == user_id)
         )
         if user is None:
-            raise AuthError(404, "User not found")
+            raise ServiceError(404, "User not found")
         return user
 
     async def list_users(self, page: int, per_page: int, email: str | None) -> dict[str, Any]:
@@ -64,7 +64,7 @@ class AdminService:
                 .where(UserGroup.name == UserGroupEnum.ADMIN)
             )
             if (admins or 0) <= 1:
-                raise AuthError(409, "Cannot demote the last admin")
+                raise ServiceError(409, "Cannot demote the last admin")
         new_group = await self.session.scalar(select(UserGroup).where(UserGroup.name == group))
         if new_group is None:
             raise RuntimeError("User groups have not been seeded by migrations")
@@ -133,5 +133,5 @@ class AdminService:
 
     async def cart(self, user_id: UUID) -> dict[str, object]:
         if await self.session.get(User, user_id) is None:
-            raise AuthError(404, "User not found")
+            raise ServiceError(404, "User not found")
         return await PurchaseService(self.session).cart(user_id)

@@ -1,6 +1,6 @@
-from typing import Annotated, NoReturn
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.security import OAuth2PasswordRequestForm
 
 from app.api.dependencies import get_auth_service, get_current_user
@@ -15,13 +15,9 @@ from app.schemas.auth import (
     RefreshRequest,
     TokenResponse,
 )
-from app.services.auth import AuthError, AuthService
+from app.services.auth import AuthService
 
 router = APIRouter(prefix="/api/v1/auth", tags=["authentication"])
-
-
-def _raise_http(exc: AuthError) -> NoReturn:
-    raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
 @router.post(
@@ -42,12 +38,7 @@ async def register(
     policy: 12-128 characters with lower- and uppercase letters, a digit and a special
     character.
     """
-    try:
-        return await service.register(body.email, body.password)
-    except AuthError as exc:
-        _raise_http(exc)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return await service.register(body.email, body.password)
 
 
 @router.get(
@@ -63,10 +54,7 @@ async def activate(
     """Activates the account that owns the one-time token from the activation email. Expired,
     unknown or already used tokens return 400.
     """
-    try:
-        return await service.activate(token)
-    except AuthError as exc:
-        _raise_http(exc)
+    return await service.activate(token)
 
 
 @router.post(
@@ -99,10 +87,7 @@ async def login(
     """Exchanges email and password of an active account for an access JWT and a refresh JWT. Wrong
     credentials return 401, an account that is not activated yet returns 403.
     """
-    try:
-        return await service.login(body.email, body.password)
-    except AuthError as exc:
-        _raise_http(exc)
+    return await service.login(body.email, body.password)
 
 
 @router.post(
@@ -118,10 +103,7 @@ async def oauth_login(
     """Same as login, but accepts the `application/x-www-form-urlencoded` form used by Swagger's
     Authorize dialog (`username` is the email).
     """
-    try:
-        return await service.login(form.username, form.password)
-    except AuthError as exc:
-        _raise_http(exc)
+    return await service.login(form.username, form.password)
 
 
 @router.post(
@@ -134,10 +116,7 @@ async def refresh(
     body: RefreshRequest, service: Annotated[AuthService, Depends(get_auth_service)]
 ) -> dict[str, str]:
     """Returns a new access token for a valid, non-revoked refresh token."""
-    try:
-        return await service.refresh(body.refresh_token)
-    except AuthError as exc:
-        _raise_http(exc)
+    return await service.refresh(body.refresh_token)
 
 
 @router.post(
@@ -153,10 +132,7 @@ async def logout(
     body: RefreshRequest, service: Annotated[AuthService, Depends(get_auth_service)]
 ) -> dict[str, str]:
     """Revokes the given refresh token so it can no longer be used."""
-    try:
-        return await service.logout(body.refresh_token)
-    except AuthError as exc:
-        _raise_http(exc)
+    return await service.logout(body.refresh_token)
 
 
 @router.post(
@@ -177,12 +153,7 @@ async def change_password(
     """Changes the caller's password after checking the old one and revokes all of the caller's
     refresh tokens.
     """
-    try:
-        return await service.change_password(user, body.old_password, body.new_password)
-    except AuthError as exc:
-        _raise_http(exc)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return await service.change_password(user, body.old_password, body.new_password)
 
 
 @router.post(
@@ -212,9 +183,4 @@ async def reset_password(
     """Sets a new password using a one-time reset token and revokes all refresh tokens of the
     account.
     """
-    try:
-        return await service.reset_password(body.token, body.new_password)
-    except AuthError as exc:
-        _raise_http(exc)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return await service.reset_password(body.token, body.new_password)

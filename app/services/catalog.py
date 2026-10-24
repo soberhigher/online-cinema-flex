@@ -10,7 +10,7 @@ from app.models.catalog import Certification, Director, Genre, Movie, Star, movi
 from app.models.favorites import Favorite
 from app.models.purchases import CartItem, OrderItem
 from app.schemas.catalog import MovieInput
-from app.services.auth import AuthError
+from app.services.errors import ServiceError
 
 SORT_COLUMNS = {
     "name": Movie.name,
@@ -115,7 +115,7 @@ class CatalogService:
             .where(Movie.id == movie_id)
         )
         if movie is None:
-            raise AuthError(404, "Movie not found")
+            raise ServiceError(404, "Movie not found")
         return movie
 
     async def create_movie(self, data: MovieInput) -> Movie:
@@ -123,7 +123,7 @@ class CatalogService:
             data.certification_id is not None
             and await self.session.get(Certification, data.certification_id) is None
         ):
-            raise AuthError(404, "Certification not found")
+            raise ServiceError(404, "Certification not found")
         movie = Movie(
             **data.model_dump(exclude={"genre_ids", "star_ids", "director_ids"}),
             genres=await self._references(Genre, data.genre_ids),
@@ -135,7 +135,7 @@ class CatalogService:
             await self.session.commit()
         except IntegrityError as exc:
             await self.session.rollback()
-            raise AuthError(409, "Movie conflicts with an existing catalog entry") from exc
+            raise ServiceError(409, "Movie conflicts with an existing catalog entry") from exc
         return await self.get_movie(movie.id)
 
     async def update_movie(self, movie_id: UUID, data: MovieInput) -> Movie:
@@ -149,12 +149,12 @@ class CatalogService:
             .where(Movie.id == movie_id)
         )
         if movie is None:
-            raise AuthError(404, "Movie not found")
+            raise ServiceError(404, "Movie not found")
         if (
             data.certification_id is not None
             and await self.session.get(Certification, data.certification_id) is None
         ):
-            raise AuthError(404, "Certification not found")
+            raise ServiceError(404, "Certification not found")
         values = data.model_dump(exclude={"genre_ids", "star_ids", "director_ids"})
         for field, value in values.items():
             setattr(movie, field, value)
@@ -165,13 +165,13 @@ class CatalogService:
             await self.session.commit()
         except IntegrityError as exc:
             await self.session.rollback()
-            raise AuthError(409, "Movie conflicts with an existing catalog entry") from exc
+            raise ServiceError(409, "Movie conflicts with an existing catalog entry") from exc
         return await self.get_movie(movie.id)
 
     async def delete_movie(self, movie_id: UUID) -> None:
         movie = await self.session.get(Movie, movie_id)
         if movie is None:
-            raise AuthError(404, "Movie not found")
+            raise ServiceError(404, "Movie not found")
         in_cart = await self.session.scalar(
             select(CartItem.id).where(CartItem.movie_id == movie_id).limit(1)
         )
@@ -179,7 +179,7 @@ class CatalogService:
             select(OrderItem.id).where(OrderItem.movie_id == movie_id).limit(1)
         )
         if in_cart is not None or in_order is not None:
-            raise AuthError(409, "Movie is referenced by a cart or order")
+            raise ServiceError(409, "Movie is referenced by a cart or order")
         await self.session.execute(delete(Favorite).where(Favorite.movie_id == movie_id))
         await self.session.delete(movie)
         await self.session.commit()
@@ -191,7 +191,7 @@ class CatalogService:
             (await self.session.scalars(select(model).where(model.id.in_(set(ids))))).all()
         )
         if len(records) != len(set(ids)):
-            raise AuthError(404, f"One or more {model.__tablename__} references do not exist")
+            raise ServiceError(404, f"One or more {model.__tablename__} references do not exist")
         return records
 
     async def reference_rows(self, model: type[Any]) -> list[Any]:
@@ -204,25 +204,25 @@ class CatalogService:
             await self.session.commit()
         except IntegrityError as exc:
             await self.session.rollback()
-            raise AuthError(409, "Reference name already exists") from exc
+            raise ServiceError(409, "Reference name already exists") from exc
         return record
 
     async def update_reference(self, model: type[Any], object_id: int, name: str) -> Any:
         record = await self.session.get(model, object_id)
         if record is None:
-            raise AuthError(404, "Reference not found")
+            raise ServiceError(404, "Reference not found")
         record.name = name.strip()
         try:
             await self.session.commit()
         except IntegrityError as exc:
             await self.session.rollback()
-            raise AuthError(409, "Reference name already exists") from exc
+            raise ServiceError(409, "Reference name already exists") from exc
         return record
 
     async def delete_reference(self, model: type[Any], object_id: int) -> None:
         record = await self.session.get(model, object_id)
         if record is None:
-            raise AuthError(404, "Reference not found")
+            raise ServiceError(404, "Reference not found")
         if model is Certification:
             usage = select(Movie.id).where(Movie.certification_id == object_id).limit(1)
         elif model is Genre:
@@ -232,7 +232,7 @@ class CatalogService:
         else:
             usage = select(Movie.id).join(Movie.directors).where(Director.id == object_id).limit(1)
         if await self.session.scalar(usage) is not None:
-            raise AuthError(409, "Reference is used by movies")
+            raise ServiceError(409, "Reference is used by movies")
         await self.session.delete(record)
         await self.session.commit()
 
@@ -248,5 +248,5 @@ class CatalogService:
 
     async def genre_movies(self, genre_id: int, **kwargs: Any) -> dict[str, object]:
         if await self.session.get(Genre, genre_id) is None:
-            raise AuthError(404, "Genre not found")
+            raise ServiceError(404, "Genre not found")
         return await self.list_movies(genre_id=genre_id, **kwargs)

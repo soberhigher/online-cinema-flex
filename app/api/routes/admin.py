@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import require_roles
@@ -14,7 +14,6 @@ from app.schemas.admin import AdminUserOut, AdminUserPage, GroupChange
 from app.schemas.payments import AdminPaymentPage
 from app.schemas.purchases import AdminOrderPage, CartResponse
 from app.services.admin import AdminService
-from app.services.auth import AuthError
 
 router = APIRouter(
     prefix="/api/v1/admin",
@@ -69,10 +68,7 @@ async def change_group(
     """ADMIN. Moves a user to USER, MODERATOR or ADMIN. Takes effect immediately: roles are
     read from the database on every request. Demoting the last admin returns 409.
     """
-    try:
-        return await service.change_group(user_id, body.group)
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return await service.change_group(user_id, body.group)
 
 
 @router.post(
@@ -85,10 +81,7 @@ async def activate_user(
     user_id: UUID, service: Annotated[AdminService, Depends(service)]
 ) -> dict[str, Any]:
     """ADMIN. Activates an account manually, e.g. when the activation email was lost."""
-    try:
-        return await service.activate(user_id)
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return await service.activate(user_id)
 
 
 @staff_router.get(
@@ -137,7 +130,4 @@ async def user_cart(
     user_id: UUID, service: Annotated[AdminService, Depends(service)]
 ) -> dict[str, object]:
     """MODERATOR+. The current cart of any user, e.g. for support."""
-    try:
-        return await service.cart(user_id)
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return await service.cart(user_id)
