@@ -97,7 +97,7 @@ async def login(
     body: LoginRequest, service: Annotated[AuthService, Depends(get_auth_service)]
 ) -> dict[str, str]:
     """Exchanges email and password of an active account for an access JWT and a refresh JWT. Wrong
-    credentials or an inactive account return 401.
+    credentials return 401, an account that is not activated yet returns 403.
     """
     try:
         return await service.login(body.email, body.password)
@@ -164,9 +164,9 @@ async def logout(
     summary="Change the password",
     response_model=MessageResponse,
     responses={
-        400: {"description": "Incorrect old password or policy violation"},
+        400: {"description": "Incorrect old password"},
         401: {"description": "Authentication required"},
-        422: {"description": "Request validation failed"},
+        422: {"description": "Password policy violation or invalid request"},
     },
 )
 async def change_password(

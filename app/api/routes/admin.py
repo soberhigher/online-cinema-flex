@@ -66,8 +66,8 @@ async def list_users(
 async def change_group(
     user_id: UUID, body: GroupChange, service: Annotated[AdminService, Depends(service)]
 ) -> dict[str, Any]:
-    """ADMIN. Moves a user to USER, MODERATOR or ADMIN. Takes effect on the user's next access
-    token.
+    """ADMIN. Moves a user to USER, MODERATOR or ADMIN. Takes effect immediately: roles are
+    read from the database on every request. Demoting the last admin returns 409.
     """
     try:
         return await service.change_group(user_id, body.group)
