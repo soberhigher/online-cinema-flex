@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cinema
+          POSTGRES_PASSWORD: changeme
+          POSTGRES_DB: cinema_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cinema -d cinema_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: cinema
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: cinema_test
+      TEST_DATABASE_URL: postgresql+asyncpg://cinema:changeme@localhost:5432/cinema_test
+      JWT_SECRET_KEY: ci-only-placeholder-key
+      STRIPE_SECRET_KEY: sk_test_ci_placeholder
+      STRIPE_WEBHOOK_SECRET: whsec_ci_placeholder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: poetry
+      - name: Install Poetry
+        run: pip install poetry==2.5.1
+      - name: Install dependencies
+        run: poetry install --with dev
+      - name: Ruff
+        run: poetry run ruff check .
+      - name: Mypy
+        run: poetry run mypy app
+      - name: Pytest with coverage
+        run: poetry run pytest --cov=app --cov-report=term-missing
