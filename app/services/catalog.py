@@ -21,7 +21,10 @@ SORT_COLUMNS = {
 }
 
 
-ReferenceModel = Any
+def like_pattern(text: str) -> str:
+    """Substring pattern for ILIKE that treats %, _ and backslash in user input literally."""
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
 
 
 class CatalogService:
@@ -39,8 +42,6 @@ class CatalogService:
     ) -> Any:
         query = select(Movie)
         if favorite_user_id is not None:
-            from app.models.favorites import Favorite
-
             query = query.join(Favorite, Favorite.movie_id == Movie.id).where(
                 Favorite.user_id == favorite_user_id
             )
@@ -52,14 +53,14 @@ class CatalogService:
             query = query.where(Movie.imdb >= min_imdb)
         if search:
             # Text search over title, description, genre, star and director names only.
-            term = f"%{search.strip()}%"
+            term = like_pattern(search.strip())
             query = query.where(
                 or_(
-                    Movie.name.ilike(term),
-                    Movie.description.ilike(term),
-                    Movie.genres.any(Genre.name.ilike(term)),
-                    Movie.stars.any(Star.name.ilike(term)),
-                    Movie.directors.any(Director.name.ilike(term)),
+                    Movie.name.ilike(term, escape="\\"),
+                    Movie.description.ilike(term, escape="\\"),
+                    Movie.genres.any(Genre.name.ilike(term, escape="\\")),
+                    Movie.stars.any(Star.name.ilike(term, escape="\\")),
+                    Movie.directors.any(Director.name.ilike(term, escape="\\")),
                 )
             )
         return query.distinct()
