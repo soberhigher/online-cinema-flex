@@ -5,7 +5,7 @@ from typing import Annotated, Any
 from fastapi import Depends, FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_docs_user
 from app.api.routes import auth, catalog, favorites, health, payments, purchases
 from app.core.config import get_settings
 
@@ -37,17 +37,17 @@ def create_app() -> FastAPI:
     app.include_router(payments.router)
 
     @app.get("/openapi.json", include_in_schema=False)
-    async def openapi(user: Annotated[Any, Depends(get_current_user)]) -> JSONResponse:
+    async def openapi(user: Annotated[Any, Depends(get_docs_user)]) -> JSONResponse:
         return JSONResponse(app.openapi())
 
     @app.get("/docs", include_in_schema=False)
-    async def docs(user: Annotated[Any, Depends(get_current_user)]) -> HTMLResponse:
+    async def docs(user: Annotated[Any, Depends(get_docs_user)]) -> HTMLResponse:
         schema = json.dumps(app.openapi()).replace("</", "<\\/")
         return HTMLResponse(
             "<!doctype html><html><head><title>Online Cinema FLEX API</title>"
-            '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">'
+            '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui.css">'
             '</head><body><div id="swagger-ui"></div>'
-            '<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>'
+            '<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"></script>'
             f'<script>SwaggerUIBundle({{spec:{schema},dom_id:"#swagger-ui",persistAuthorization:true}});</script>'
             "</body></html>"
         )
