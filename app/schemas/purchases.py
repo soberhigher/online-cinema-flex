@@ -1,3 +1,4 @@
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -27,7 +28,19 @@ class OrderResponse(BaseModel):
     id: UUID
     status: str
     total_amount: Decimal
+    created_at: datetime
     items: list[OrderItemResponse]
+
+
+class AdminOrderResponse(OrderResponse):
+    user_id: UUID
+
+
+class AdminOrderPage(BaseModel):
+    items: list[AdminOrderResponse]
+    total: int
+    page: int
+    per_page: int
 
 
 class OrderCreationResponse(BaseModel):

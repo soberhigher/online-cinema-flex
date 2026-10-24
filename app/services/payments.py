@@ -19,10 +19,38 @@ from app.tasks.auth_tasks import send_email
 logger = logging.getLogger(__name__)
 
 
+def payment_data(payment: Payment) -> dict[str, Any]:
+    return {
+        "id": payment.id,
+        "order_id": payment.order_id,
+        "user_id": payment.user_id,
+        "amount": payment.amount,
+        "status": payment.status,
+        "created_at": payment.created_at,
+        "items": [
+            {
+                "movie_id": item.movie_id,
+                "title": item.movie.name,
+                "price_at_payment": item.price_at_payment,
+            }
+            for item in payment.items
+        ],
+    }
+
+
 class PaymentService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.settings = get_settings()
+
+    async def history(self, user_id: UUID) -> list[dict[str, Any]]:
+        rows = await self.session.scalars(
+            select(Payment)
+            .options(selectinload(Payment.items).selectinload(PaymentItem.movie))
+            .where(Payment.user_id == user_id)
+            .order_by(Payment.created_at.desc())
+        )
+        return [payment_data(payment) for payment in rows]
 
     async def checkout(self, user_id: UUID, order_id: UUID) -> dict[str, str | None]:
         order = await self.session.scalar(

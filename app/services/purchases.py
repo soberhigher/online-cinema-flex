@@ -146,6 +146,7 @@ class PurchaseService:
             "id": order.id,
             "status": order.status,
             "total_amount": order.total_amount,
+            "created_at": order.created_at,
             "items": [
                 {
                     "movie_id": item.movie_id,

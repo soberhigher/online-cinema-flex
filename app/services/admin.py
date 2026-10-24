@@ -1,12 +1,17 @@
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import Select, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.accounts import ActivationToken, User, UserGroup, UserGroupEnum
+from app.models.payments import Payment, PaymentItem
+from app.models.purchases import Order, OrderItem
 from app.services.auth import AuthError
+from app.services.payments import payment_data
+from app.services.purchases import PurchaseService
 
 
 def user_data(user: User) -> dict[str, Any]:
@@ -67,3 +72,57 @@ class AdminService:
         )
         await self.session.commit()
         return user_data(user)
+
+    async def _page(self, query: Select[Any], page: int, per_page: int) -> tuple[list[Any], int]:
+        total = await self.session.scalar(select(func.count()).select_from(query.subquery()))
+        rows = await self.session.scalars(query.offset((page - 1) * per_page).limit(per_page))
+        return list(rows), total or 0
+
+    async def orders(
+        self,
+        page: int,
+        per_page: int,
+        user_id: UUID | None = None,
+        status: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ) -> dict[str, Any]:
+        query = select(Order).options(selectinload(Order.items).selectinload(OrderItem.movie))
+        if user_id is not None:
+            query = query.where(Order.user_id == user_id)
+        if status is not None:
+            query = query.where(Order.status == status)
+        if date_from is not None:
+            query = query.where(Order.created_at >= date_from)
+        if date_to is not None:
+            query = query.where(Order.created_at <= date_to)
+        rows, total = await self._page(query.order_by(Order.created_at.desc()), page, per_page)
+        items = [{**PurchaseService._order_data(order), "user_id": order.user_id} for order in rows]
+        return {"items": items, "total": total, "page": page, "per_page": per_page}
+
+    async def payments(
+        self,
+        page: int,
+        per_page: int,
+        user_id: UUID | None = None,
+        status: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ) -> dict[str, Any]:
+        query = select(Payment).options(selectinload(Payment.items).selectinload(PaymentItem.movie))
+        if user_id is not None:
+            query = query.where(Payment.user_id == user_id)
+        if status is not None:
+            query = query.where(Payment.status == status)
+        if date_from is not None:
+            query = query.where(Payment.created_at >= date_from)
+        if date_to is not None:
+            query = query.where(Payment.created_at <= date_to)
+        rows, total = await self._page(query.order_by(Payment.created_at.desc()), page, per_page)
+        items = [payment_data(payment) for payment in rows]
+        return {"items": items, "total": total, "page": page, "per_page": per_page}
+
+    async def cart(self, user_id: UUID) -> dict[str, object]:
+        if await self.session.get(User, user_id) is None:
+            raise AuthError(404, "User not found")
+        return await PurchaseService(self.session).cart(user_id)
