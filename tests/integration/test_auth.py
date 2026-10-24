@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models.accounts import ActivationToken, PasswordResetToken, User
-from tests.helpers import queued_emails
+from tests.helpers import STRONG_PASSWORD, queued_emails
 
 
 @pytest.mark.asyncio
@@ -103,10 +103,12 @@ async def test_registration_activation_refresh_and_logout(
     refreshed = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
     assert refreshed.status_code == 200
     assert refreshed.json()["token_type"] == "bearer"
-    logged_out = await client.post("/api/v1/auth/logout", json={"refresh_token": refresh_token})
+    rotated_token = refreshed.json()["refresh_token"]
+    assert rotated_token != refresh_token
+    logged_out = await client.post("/api/v1/auth/logout", json={"refresh_token": rotated_token})
     assert logged_out.status_code == 200
     rejected_refresh = await client.post(
-        "/api/v1/auth/refresh", json={"refresh_token": refresh_token}
+        "/api/v1/auth/refresh", json={"refresh_token": rotated_token}
     )
     assert rejected_refresh.status_code == 401
     forgotten = await client.post("/api/v1/auth/forgot-password", json={"email": email})
@@ -168,6 +170,8 @@ async def test_registration_activation_refresh_and_logout(
         headers={"Authorization": f"Bearer {access}"},
     )
     assert change.status_code == 200
+    stale_access = await client.get("/api/v1/cart", headers={"Authorization": f"Bearer {access}"})
+    assert stale_access.status_code == 401
     revoked = await client.post(
         "/api/v1/auth/refresh",
         json={"refresh_token": changed_login.json()["refresh_token"]},
@@ -217,3 +221,22 @@ async def test_login_errors_and_mail_outage_do_not_break_registration(
     assert resent.status_code == 200
     assert queued_emails[-1][0] == "outage@example.com"
     assert "/api/v1/auth/activate?token=" in queued_emails[-1][2]
+
+
+async def test_reused_refresh_token_revokes_every_session(client: AsyncClient) -> None:
+    email = "rotation@example.com"
+    await client.post("/api/v1/auth/register", json={"email": email, "password": STRONG_PASSWORD})
+    token = re.search(r"token=([A-Za-z0-9_-]+)", queued_emails[-1][2])
+    assert token is not None
+    await client.get("/api/v1/auth/activate", params={"token": token.group(1)})
+    login = await client.post(
+        "/api/v1/auth/login", json={"email": email, "password": STRONG_PASSWORD}
+    )
+    first = login.json()["refresh_token"]
+    rotated = await client.post("/api/v1/auth/refresh", json={"refresh_token": first})
+    second = rotated.json()["refresh_token"]
+
+    reused = await client.post("/api/v1/auth/refresh", json={"refresh_token": first})
+    assert reused.status_code == 401
+    after_reuse = await client.post("/api/v1/auth/refresh", json={"refresh_token": second})
+    assert after_reuse.status_code == 401

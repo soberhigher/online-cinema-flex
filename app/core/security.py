@@ -1,6 +1,7 @@
 import secrets
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from typing import Any
 
 import jwt
 from argon2 import PasswordHasher
@@ -34,6 +35,10 @@ def hash_password(password: str) -> str:
     return _password_hasher.hash(password)
 
 
+# Verified when the email is unknown, so that login takes the same time either way.
+DUMMY_PASSWORD_HASH = _password_hasher.hash(secrets.token_urlsafe(16))
+
+
 def verify_password(password: str, password_hash: str) -> bool:
     try:
         return _password_hasher.verify(password_hash, password)
@@ -52,9 +57,10 @@ def hash_token(raw_token: str) -> str:
 
 
 def create_access_token(user_id: str, role: str) -> tuple[str, datetime]:
-    expires_at = datetime.now(UTC) + timedelta(minutes=settings.access_token_ttl_minutes)
+    now = datetime.now(UTC)
+    expires_at = now + timedelta(minutes=settings.access_token_ttl_minutes)
     encoded = jwt.encode(
-        {"sub": user_id, "role": role, "type": "access", "exp": expires_at},
+        {"sub": user_id, "role": role, "type": "access", "iat": now.timestamp(), "exp": expires_at},
         settings.jwt_secret_key,
         algorithm=settings.jwt_algorithm,
     )
@@ -71,7 +77,7 @@ def create_refresh_token(user_id: str) -> tuple[str, datetime]:
     return encoded, expires_at
 
 
-def decode_token(encoded: str, expected_type: str) -> dict[str, str]:
+def decode_token(encoded: str, expected_type: str) -> dict[str, Any]:
     try:
         payload = jwt.decode(encoded, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
         if payload.get("type") != expected_type or not payload.get("sub"):

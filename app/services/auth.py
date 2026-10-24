@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.core.security import (
+    DUMMY_PASSWORD_HASH,
     InvalidTokenError,
     create_access_token,
     create_refresh_token,
@@ -66,7 +67,8 @@ class AuthService:
             .options(selectinload(User.group))
             .where(User.email == email.strip().lower())
         )
-        if user is None or not user.is_active or not verify_password(password, user.password_hash):
+        password_hash = user.password_hash if user is not None else DUMMY_PASSWORD_HASH
+        if not verify_password(password, password_hash) or user is None or not user.is_active:
             return None
         return user
 
@@ -142,15 +144,20 @@ class AuthService:
             .options(selectinload(User.group))
             .where(User.email == email.strip().lower())
         )
-        if user is None or not verify_password(password, user.password_hash):
+        password_hash = user.password_hash if user is not None else DUMMY_PASSWORD_HASH
+        if not verify_password(password, password_hash) or user is None:
             raise ServiceError(401, "Email or password is incorrect")
         if not user.is_active:
             raise ServiceError(403, "Account is not activated")
+        tokens = self._issue_tokens(user)
+        await self.session.commit()
+        return tokens
+
+    def _issue_tokens(self, user: User) -> dict[str, str]:
         access, _ = create_access_token(str(user.id), user.group.name)
         refresh, expires = create_refresh_token(str(user.id))
-        payload = decode_token(refresh, "refresh")
-        self.session.add(RefreshToken(user_id=user.id, jti=payload["jti"], expires_at=expires))
-        await self.session.commit()
+        jti = decode_token(refresh, "refresh")["jti"]
+        self.session.add(RefreshToken(user_id=user.id, jti=jti, expires_at=expires))
         return {"access_token": access, "refresh_token": refresh, "token_type": "bearer"}
 
     async def refresh(self, raw: str) -> dict[str, str]:
@@ -161,15 +168,24 @@ class AuthService:
         token = await self.session.scalar(
             select(RefreshToken).where(RefreshToken.jti == payload.get("jti"))
         )
-        if token is None or token.revoked_at is not None or token.expires_at <= datetime.now(UTC):
+        if token is not None and token.revoked_at is not None:
+            # A rotated token came back: someone else may hold a copy, end every session.
+            await self.session.execute(
+                delete(RefreshToken).where(RefreshToken.user_id == token.user_id)
+            )
+            await self.session.commit()
+            raise ServiceError(401, "Refresh token is invalid or revoked")
+        if token is None or token.expires_at <= datetime.now(UTC):
             raise ServiceError(401, "Refresh token is invalid or revoked")
         user = await self.session.scalar(
             select(User).options(selectinload(User.group)).where(User.id == token.user_id)
         )
         if user is None or not user.is_active:
             raise ServiceError(401, "Refresh token is invalid or revoked")
-        access, _ = create_access_token(str(user.id), user.group.name)
-        return {"access_token": access, "refresh_token": raw, "token_type": "bearer"}
+        token.revoked_at = datetime.now(UTC)
+        tokens = self._issue_tokens(user)
+        await self.session.commit()
+        return tokens
 
     async def logout(self, raw: str) -> dict[str, str]:
         try:
@@ -190,6 +206,7 @@ class AuthService:
             raise ServiceError(400, "Current password is incorrect")
         validate_password(new)
         user.password_hash = hash_password(new)
+        user.password_changed_at = datetime.now(UTC)
         await self.session.execute(delete(RefreshToken).where(RefreshToken.user_id == user.id))
         await self.session.commit()
         return {"message": "Password changed; all refresh sessions were revoked"}
@@ -227,6 +244,7 @@ class AuthService:
         if user is None:
             raise ServiceError(400, "Password reset token is invalid or expired")
         user.password_hash = hash_password(new)
+        user.password_changed_at = datetime.now(UTC)
         await self.session.delete(token)
         await self.session.execute(delete(RefreshToken).where(RefreshToken.user_id == user.id))
         await self.session.commit()
@@ -245,5 +263,8 @@ class AuthService:
             select(User).options(selectinload(User.group)).where(User.id == user_id)
         )
         if user is None or not user.is_active:
+            raise ServiceError(401, "Invalid access token")
+        changed_at = user.password_changed_at
+        if changed_at is not None and payload.get("iat", 0) < changed_at.timestamp():
             raise ServiceError(401, "Invalid access token")
         return user

@@ -115,7 +115,9 @@ async def oauth_login(
 async def refresh(
     body: RefreshRequest, service: Annotated[AuthService, Depends(get_auth_service)]
 ) -> dict[str, str]:
-    """Returns a new access token for a valid, non-revoked refresh token."""
+    """Returns a new access token and a new refresh token; the old refresh token stops working.
+    Presenting an already rotated refresh token again revokes all of the account's sessions.
+    """
     return await service.refresh(body.refresh_token)
 
 
@@ -150,8 +152,8 @@ async def change_password(
     user: Annotated[User, Depends(get_current_user)],
     service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> dict[str, str]:
-    """Changes the caller's password after checking the old one and revokes all of the caller's
-    refresh tokens.
+    """Changes the caller's password after checking the old one. All refresh tokens are revoked
+    and access tokens issued before the change stop working.
     """
     return await service.change_password(user, body.old_password, body.new_password)
 
