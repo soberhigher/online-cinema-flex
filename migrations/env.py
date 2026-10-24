@@ -17,9 +17,8 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Alembic reads the DB URL from environment-driven settings
-# (POSTGRES_HOST etc.), never from a hardcoded sqlalchemy.url.
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+if config.attributes.get("connection") is None:
+    config.set_main_option("sqlalchemy.url", get_settings().database_url)
 
 # add your model's MetaData object here
 # for 'autogenerate' support
