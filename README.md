@@ -30,6 +30,15 @@ FastAPI backend for six FLEX features: accounts/authentication, movie catalog, f
    Expected: `{"status":"ok","database":"ok"}`. API: `http://localhost:8000`; MailHog UI: `http://localhost:8025`.
 4. Apply migrations manually when needed: `docker compose exec api poetry run alembic upgrade head`.
 
+5. Create an administrator and demo catalog data:
+
+   ```sh
+   docker compose exec api poetry run python -m app.cli create-user --email admin@example.com --password "ChangeMe-Admin1!" --role ADMIN
+   docker compose exec api poetry run python -m app.cli seed-catalog
+   ```
+
+   `create-user` creates an already active account (roles `USER`, `MODERATOR`, `ADMIN`) and enforces the password policy. `seed-catalog` is idempotent: it adds genres, stars, directors, certifications and 7 movies, skipping movies that already exist.
+
 The app and integration tests use PostgreSQL; SQLite is not supported. Compose's `db` hostname is for container-to-container access.
 
 ## Authentication and API documentation
@@ -45,6 +54,7 @@ All business routes are under `/api/v1`. Register with `POST /api/v1/auth/regist
 | `/api/v1/auth` | Register, activate/resend, login, refresh/logout, change/forgot/reset password |
 | `/api/v1/movies` | Public movie search, filters, sort, pagination, detail, genres |
 | `/api/v1/catalog-admin` | Moderator/admin movie and reference-data CRUD |
+| `/api/v1/admin` | Admin only: list users (`email` filter, pagination), change a user's group, activate a user |
 | `/api/v1/favorites` | Add/remove/list the caller's favorite movies |
 | `/api/v1/cart` | Read, add/remove items, clear cart |
 | `/api/v1/orders` | Create/list/read/cancel pending orders; prices are snapshotted |

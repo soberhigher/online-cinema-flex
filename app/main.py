@@ -6,7 +6,7 @@ from fastapi import Depends, FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.api.dependencies import get_docs_user
-from app.api.routes import auth, catalog, favorites, health, payments, purchases
+from app.api.routes import admin, auth, catalog, favorites, health, payments, purchases
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -35,6 +35,7 @@ def create_app() -> FastAPI:
     app.include_router(purchases.cart_router)
     app.include_router(purchases.order_router)
     app.include_router(payments.router)
+    app.include_router(admin.router)
 
     @app.get("/openapi.json", include_in_schema=False)
     async def openapi(user: Annotated[Any, Depends(get_docs_user)]) -> JSONResponse:
