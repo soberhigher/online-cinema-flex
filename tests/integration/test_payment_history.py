@@ -243,3 +243,92 @@ async def test_first_cart_insert_race_reuses_existing_cart(
     async with db_factory() as session:
         carts = (await session.scalars(select(Cart).where(Cart.user_id == user_id))).all()
     assert len(carts) == 1
+
+
+@pytest.mark.asyncio
+async def test_expiry_of_superseded_session_keeps_order_payable(
+    client: AsyncClient,
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = await create_user(db_factory, "retry@example.com")
+    headers = bearer(user_id)
+    movie_id = await create_movie(db_factory, "Retry", "3.00")
+    await client.post(f"/api/v1/cart/items/{movie_id}", headers=headers)
+    order = (await client.post("/api/v1/orders", headers=headers)).json()["order"]
+    for session_id in ("cs_old", "cs_new"):
+        monkeypatch.setattr(
+            stripe.checkout.Session,
+            "create",
+            lambda session_id=session_id, **_: SimpleNamespace(
+                id=session_id, url="https://checkout.test"
+            ),
+        )
+        checkout = await client.post(f"/api/v1/payments/checkout/{order['id']}", headers=headers)
+        assert checkout.json()["checkout_id"] == session_id
+
+    expired, expired_sig = signed_webhook(
+        checkout_event(
+            "evt_old_expired",
+            "cs_old",
+            order["id"],
+            user_id,
+            300,
+            event_type="checkout.session.expired",
+            payment_status="unpaid",
+        )
+    )
+    response = await client.post("/api/v1/payments/webhook", content=expired, headers=expired_sig)
+    assert response.json()["ignored"] is True
+    detail = await client.get(f"/api/v1/orders/{order['id']}", headers=headers)
+    assert detail.json()["status"] == "pending"
+
+    paid, paid_sig = signed_webhook(
+        checkout_event("evt_new_paid", "cs_new", order["id"], user_id, 300)
+    )
+    response = await client.post("/api/v1/payments/webhook", content=paid, headers=paid_sig)
+    assert response.json()["status"] == "successful"
+    detail = await client.get(f"/api/v1/orders/{order['id']}", headers=headers)
+    assert detail.json()["status"] == "paid"
+
+
+@pytest.mark.asyncio
+async def test_charge_after_recorded_cancellation_upgrades_payment(
+    client: AsyncClient,
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = await create_user(db_factory, "async@example.com")
+    headers = bearer(user_id)
+    movie_id = await create_movie(db_factory, "Async", "4.00")
+    await client.post(f"/api/v1/cart/items/{movie_id}", headers=headers)
+    order = (await client.post("/api/v1/orders", headers=headers)).json()["order"]
+    monkeypatch.setattr(
+        stripe.checkout.Session,
+        "create",
+        lambda **_: SimpleNamespace(id="cs_async", url="https://checkout.test"),
+    )
+    await client.post(f"/api/v1/payments/checkout/{order['id']}", headers=headers)
+    failed, failed_sig = signed_webhook(
+        checkout_event(
+            "evt_async_failed",
+            "cs_async",
+            order["id"],
+            user_id,
+            400,
+            event_type="checkout.session.async_payment_failed",
+            payment_status="unpaid",
+        )
+    )
+    response = await client.post("/api/v1/payments/webhook", content=failed, headers=failed_sig)
+    assert response.json()["status"] == "canceled"
+
+    paid, paid_sig = signed_webhook(
+        checkout_event("evt_async_paid", "cs_async", order["id"], user_id, 400)
+    )
+    response = await client.post("/api/v1/payments/webhook", content=paid, headers=paid_sig)
+    assert response.json()["status"] == "successful"
+    [payment] = (await client.get("/api/v1/payments", headers=headers)).json()
+    assert payment["status"] == "successful"
+    detail = await client.get(f"/api/v1/orders/{order['id']}", headers=headers)
+    assert detail.json()["status"] == "paid"

@@ -10,6 +10,7 @@ from app.models.accounts import ActivationToken, User, UserGroup, UserGroupEnum
 from app.models.payments import Payment, PaymentItem
 from app.models.purchases import Order, OrderItem
 from app.services.auth import AuthError
+from app.services.catalog import like_pattern
 from app.services.payments import payment_data
 from app.services.purchases import PurchaseService
 
@@ -39,7 +40,7 @@ class AdminService:
     async def list_users(self, page: int, per_page: int, email: str | None) -> dict[str, Any]:
         query = select(User)
         if email:
-            query = query.where(User.email.ilike(f"%{email.strip().lower()}%"))
+            query = query.where(User.email.ilike(like_pattern(email.strip().lower()), escape="\\"))
         total = await self.session.scalar(select(func.count()).select_from(query.subquery()))
         users = await self.session.scalars(
             query.options(selectinload(User.group))
@@ -56,6 +57,14 @@ class AdminService:
 
     async def change_group(self, user_id: UUID, group: UserGroupEnum) -> dict[str, Any]:
         user = await self._user(user_id)
+        if user.group.name == UserGroupEnum.ADMIN and group != UserGroupEnum.ADMIN:
+            admins = await self.session.scalar(
+                select(func.count(User.id))
+                .join(UserGroup)
+                .where(UserGroup.name == UserGroupEnum.ADMIN)
+            )
+            if (admins or 0) <= 1:
+                raise AuthError(409, "Cannot demote the last admin")
         new_group = await self.session.scalar(select(UserGroup).where(UserGroup.name == group))
         if new_group is None:
             raise RuntimeError("User groups have not been seeded by migrations")

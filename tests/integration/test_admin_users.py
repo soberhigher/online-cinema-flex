@@ -94,3 +94,34 @@ def test_cli_parser() -> None:
     )
     assert (args.command, args.role) == ("create-user", "ADMIN")
     assert build_parser().parse_args(["seed-catalog"]).command == "seed-catalog"
+
+
+@pytest.mark.asyncio
+async def test_last_admin_cannot_be_demoted(
+    client: AsyncClient, db_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    admin_id = await create_user(db_factory, "solo@example.com", UserGroupEnum.ADMIN)
+    headers = bearer(admin_id, UserGroupEnum.ADMIN)
+    path = f"/api/v1/admin/users/{admin_id}/group"
+    response = await client.patch(path, json={"group": "USER"}, headers=headers)
+    assert response.status_code == 409
+
+    second = await create_user(db_factory, "second@example.com", UserGroupEnum.ADMIN)
+    response = await client.patch(path, json={"group": "MODERATOR"}, headers=headers)
+    assert response.status_code == 200
+    response = await client.patch(
+        f"/api/v1/admin/users/{second}/group", json={"group": "USER"}, headers=headers
+    )
+    assert response.status_code == 403  # the caller is no longer an admin
+
+
+@pytest.mark.asyncio
+async def test_search_treats_wildcards_literally(
+    client: AsyncClient, db_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    async with db_factory() as session:
+        await seed_catalog(session)
+    for term in ("%", "_", "100%"):
+        response = await client.get("/api/v1/movies/", params={"search": term})
+        assert response.json()["total"] == 0
+    assert (await client.get("/api/v1/movies/", params={"search": "toy"})).json()["total"] == 1
