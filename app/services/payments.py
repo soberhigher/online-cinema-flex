@@ -1,0 +1,155 @@
+import logging
+from decimal import Decimal
+from typing import Any
+from uuid import UUID
+
+import stripe
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.core.config import get_settings
+from app.models.accounts import User
+from app.models.payments import Payment, PaymentItem, PaymentStatus
+from app.models.purchases import Order, OrderItem, OrderStatus
+from app.services.auth import AuthError
+from app.tasks.auth_tasks import send_email
+
+logger = logging.getLogger(__name__)
+
+
+class PaymentService:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+        self.settings = get_settings()
+
+    async def checkout(self, user_id: UUID, order_id: UUID) -> dict[str, str | None]:
+        order = await self.session.scalar(
+            select(Order)
+            .options(selectinload(Order.items).selectinload(OrderItem.movie))
+            .where(Order.id == order_id, Order.user_id == user_id)
+        )
+        if order is None:
+            raise AuthError(404, "Order not found")
+        if order.status != OrderStatus.PENDING or not order.items:
+            raise AuthError(409, "Only non-empty pending orders can be checked out")
+        current_total = sum((item.movie.price for item in order.items), Decimal("0.00"))
+        snapshot_total = sum((item.price_at_order for item in order.items), Decimal("0.00"))
+        if current_total != snapshot_total or current_total != order.total_amount:
+            raise AuthError(409, "Order prices changed; create a new order")
+        stripe.api_key = self.settings.stripe_secret_key
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            success_url=self.settings.stripe_success_url,
+            cancel_url=self.settings.stripe_cancel_url,
+            client_reference_id=str(order.id),
+            metadata={"order_id": str(order.id), "user_id": str(user_id)},
+            line_items=[
+                {
+                    "quantity": 1,
+                    "price_data": {
+                        "currency": "usd",
+                        "unit_amount": int(item.price_at_order * 100),
+                        "product_data": {"name": item.movie.name},
+                    },
+                }
+                for item in order.items
+            ],
+            idempotency_key=f"checkout:{order.id}",
+        )
+        return {"checkout_url": session.url, "checkout_id": session.id}
+
+    async def webhook(self, payload: bytes, signature: str) -> dict[str, Any]:
+        try:
+            event = stripe.Webhook.construct_event(
+                payload, signature, self.settings.stripe_webhook_secret
+            )
+        except (ValueError, stripe.SignatureVerificationError) as exc:
+            raise AuthError(400, "Invalid Stripe webhook signature or payload") from exc
+        event_id = str(event["id"])
+        existing = await self.session.scalar(
+            select(Payment).where(Payment.stripe_event_id == event_id)
+        )
+        if existing is not None:
+            return {"received": True, "duplicate": True}
+        event_type = str(event["type"])
+        if event_type not in {
+            "checkout.session.completed",
+            "checkout.session.expired",
+            "checkout.session.async_payment_failed",
+        }:
+            return {"received": True, "ignored": True}
+        session_data = event["data"]["object"]
+        metadata = session_data.get("metadata") or {}
+        try:
+            order_id = UUID(str(metadata["order_id"]))
+            user_id = UUID(str(metadata["user_id"]))
+        except (KeyError, ValueError, TypeError) as exc:
+            raise AuthError(400, "Stripe session has invalid order metadata") from exc
+        order = await self.session.scalar(
+            select(Order)
+            .options(selectinload(Order.items).selectinload(OrderItem.movie))
+            .where(Order.id == order_id)
+            .with_for_update()
+        )
+        if order is None or order.user_id != user_id:
+            raise AuthError(400, "Stripe session references an invalid order owner")
+        if order.status != OrderStatus.PENDING:
+            existing_payment = await self.session.scalar(
+                select(Payment).where(Payment.order_id == order_id)
+            )
+            if existing_payment is not None:
+                return {"received": True, "duplicate": True}
+            raise AuthError(409, "Order is no longer pending")
+        is_success = (
+            event_type == "checkout.session.completed"
+            and session_data.get("payment_status") == "paid"
+        )
+        expected_cents = int(order.total_amount * 100)
+        if is_success and session_data.get("amount_total") != expected_cents:
+            raise AuthError(400, "Stripe amount does not match order total")
+        checkout_id = str(session_data["id"])
+        payment = Payment(
+            order_id=order.id,
+            user_id=user_id,
+            status=PaymentStatus.SUCCESSFUL if is_success else PaymentStatus.CANCELED,
+            amount=order.total_amount,
+            stripe_checkout_id=checkout_id,
+            stripe_event_id=event_id,
+            items=[
+                PaymentItem(movie_id=item.movie_id, price_at_payment=item.price_at_order)
+                for item in order.items
+            ],
+        )
+        if is_success:
+            current_total = sum((item.movie.price for item in order.items), Decimal("0.00"))
+            snapshot_total = sum((item.price_at_order for item in order.items), Decimal("0.00"))
+            if current_total != snapshot_total or current_total != order.total_amount:
+                raise AuthError(409, "Order prices changed; create a new order")
+            order.status = OrderStatus.PAID
+        else:
+            order.status = OrderStatus.CANCELED
+        self.session.add(payment)
+        try:
+            await self.session.commit()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            duplicate = await self.session.scalar(
+                select(Payment.id).where(Payment.order_id == order_id)
+            )
+            if duplicate is not None:
+                return {"received": True, "duplicate": True}
+            raise AuthError(409, "Payment event conflicts with existing payment") from exc
+        if is_success:
+            user = await self.session.get(User, user_id)
+            if user is not None:
+                try:
+                    send_email.delay(
+                        user.email,
+                        "Online Cinema payment confirmation",
+                        f"Payment {payment.id} for order {order_id} was successful.",
+                    )
+                except Exception:
+                    logger.exception("Failed to queue payment confirmation for order %s", order_id)
+        return {"received": True, "payment_id": str(payment.id), "status": payment.status}
