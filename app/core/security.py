@@ -2,9 +2,9 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
+import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
-from jose import JWTError, jwt
 
 from app.core.config import get_settings
 
@@ -77,5 +77,5 @@ def decode_token(encoded: str, expected_type: str) -> dict[str, str]:
         if payload.get("type") != expected_type or not payload.get("sub"):
             raise InvalidTokenError("Invalid token type or subject")
         return payload
-    except (JWTError, TypeError) as exc:
+    except jwt.PyJWTError as exc:
         raise InvalidTokenError("Invalid or expired token") from exc
