@@ -36,6 +36,7 @@ def create_app() -> FastAPI:
     app.include_router(purchases.order_router)
     app.include_router(payments.router)
     app.include_router(admin.router)
+    app.include_router(admin.staff_router)
 
     @app.get("/openapi.json", include_in_schema=False)
     async def openapi(user: Annotated[Any, Depends(get_docs_user)]) -> JSONResponse:

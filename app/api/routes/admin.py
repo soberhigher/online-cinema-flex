@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -7,7 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import require_roles
 from app.core.database import get_session
 from app.models.accounts import UserGroupEnum
+from app.models.payments import PaymentStatus
+from app.models.purchases import OrderStatus
 from app.schemas.admin import AdminUserOut, AdminUserPage, GroupChange
+from app.schemas.payments import AdminPaymentPage
+from app.schemas.purchases import AdminOrderPage, CartResponse
 from app.services.admin import AdminService
 from app.services.auth import AuthError
 
@@ -16,6 +21,18 @@ router = APIRouter(
     tags=["user administration"],
     dependencies=[Depends(require_roles(UserGroupEnum.ADMIN))],
 )
+
+staff_router = APIRouter(
+    prefix="/api/v1/admin",
+    tags=["sales administration"],
+    dependencies=[Depends(require_roles(UserGroupEnum.MODERATOR))],
+)
+
+STAFF_ERRORS: dict[int | str, dict[str, Any]] = {
+    401: {"description": "Authentication required or access token is invalid"},
+    403: {"description": "Only moderators and administrators may view sales data"},
+    422: {"description": "Request validation failed"},
+}
 
 ADMIN_ERRORS: dict[int | str, dict[str, Any]] = {
     401: {"description": "Authentication required or access token is invalid"},
@@ -55,5 +72,45 @@ async def activate_user(
 ) -> dict[str, Any]:
     try:
         return await service.activate(user_id)
+    except AuthError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@staff_router.get("/orders", response_model=AdminOrderPage, responses=STAFF_ERRORS)
+async def list_orders(
+    service: Annotated[AdminService, Depends(service)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    per_page: Annotated[int, Query(ge=1, le=100)] = 20,
+    user_id: UUID | None = None,
+    status: OrderStatus | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> dict[str, Any]:
+    return await service.orders(page, per_page, user_id, status, date_from, date_to)
+
+
+@staff_router.get("/payments", response_model=AdminPaymentPage, responses=STAFF_ERRORS)
+async def list_payments(
+    service: Annotated[AdminService, Depends(service)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    per_page: Annotated[int, Query(ge=1, le=100)] = 20,
+    user_id: UUID | None = None,
+    status: PaymentStatus | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> dict[str, Any]:
+    return await service.payments(page, per_page, user_id, status, date_from, date_to)
+
+
+@staff_router.get(
+    "/carts/{user_id}",
+    response_model=CartResponse,
+    responses={**STAFF_ERRORS, 404: {"description": "User not found"}},
+)
+async def user_cart(
+    user_id: UUID, service: Annotated[AdminService, Depends(service)]
+) -> dict[str, object]:
+    try:
+        return await service.cart(user_id)
     except AuthError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
