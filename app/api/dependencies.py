@@ -6,6 +6,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials, OAuth2PasswordBear
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
+from app.core.rate_limit import check_rate_limit
 from app.models.accounts import User, UserGroupEnum
 from app.services.auth import AuthService
 from app.services.errors import ServiceError
@@ -53,6 +54,7 @@ async def get_docs_user(
         except ServiceError:
             pass
     elif credentials is not None:
+        check_rate_limit(request, "docs-login", 10, 60)
         user = await service.authenticate(credentials.username, credentials.password)
         if user is not None:
             return user

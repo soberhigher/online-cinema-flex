@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.database import get_session
+from app.core.rate_limit import limiter
 from app.main import app
 from app.tasks.auth_tasks import send_email
 from tests.helpers import TEST_DATABASE_URL, queued_emails
@@ -43,6 +44,7 @@ async def client(
 
     app.dependency_overrides[get_session] = override_session
     queued_emails.clear()
+    limiter.reset()
     original_delay = send_email.delay
     send_email.delay = lambda to, subject, body: queued_emails.append((to, subject, body))
     try:

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.security import OAuth2PasswordRequestForm
 
 from app.api.dependencies import get_auth_service, get_current_user
+from app.core.rate_limit import rate_limit
 from app.models.accounts import User
 from app.schemas.auth import (
     Credentials,
@@ -22,6 +23,7 @@ router = APIRouter(prefix="/api/v1/auth", tags=["authentication"])
 
 @router.post(
     "/register",
+    dependencies=[Depends(rate_limit("register", 5))],
     summary="Register an account",
     response_model=MessageResponse,
     status_code=201,
@@ -59,6 +61,7 @@ async def activate(
 
 @router.post(
     "/resend-activation",
+    dependencies=[Depends(rate_limit("activation-email", 3))],
     summary="Resend the activation email",
     response_model=MessageResponse,
     responses={422: {"description": "Request validation failed"}},
@@ -74,6 +77,7 @@ async def resend_activation(
 
 @router.post(
     "/login",
+    dependencies=[Depends(rate_limit("login", 10))],
     summary="Log in with JSON credentials",
     response_model=TokenResponse,
     responses={
@@ -92,6 +96,7 @@ async def login(
 
 @router.post(
     "/token",
+    dependencies=[Depends(rate_limit("login", 10))],
     summary="Log in with an OAuth2 password form",
     response_model=TokenResponse,
     include_in_schema=False,
@@ -139,6 +144,7 @@ async def logout(
 
 @router.post(
     "/change-password",
+    dependencies=[Depends(rate_limit("change-password", 10))],
     summary="Change the password",
     response_model=MessageResponse,
     responses={
@@ -160,6 +166,7 @@ async def change_password(
 
 @router.post(
     "/forgot-password",
+    dependencies=[Depends(rate_limit("reset-email", 3))],
     summary="Request a password reset",
     response_model=MessageResponse,
     responses={422: {"description": "Request validation failed"}},
@@ -175,6 +182,7 @@ async def forgot_password(
 
 @router.post(
     "/reset-password",
+    dependencies=[Depends(rate_limit("reset-password", 10))],
     summary="Reset the password",
     response_model=MessageResponse,
     responses={400: {"description": "Invalid or expired reset token"}},

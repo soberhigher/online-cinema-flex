@@ -240,3 +240,12 @@ async def test_reused_refresh_token_revokes_every_session(client: AsyncClient) -
     assert reused.status_code == 401
     after_reuse = await client.post("/api/v1/auth/refresh", json={"refresh_token": second})
     assert after_reuse.status_code == 401
+
+
+async def test_login_is_rate_limited(client: AsyncClient) -> None:
+    credentials = {"email": "nobody@example.com", "password": "WrongPassword9!"}
+    for _ in range(10):
+        assert (await client.post("/api/v1/auth/login", json=credentials)).status_code == 401
+    limited = await client.post("/api/v1/auth/login", json=credentials)
+    assert limited.status_code == 429
+    assert int(limited.headers["Retry-After"]) > 0
