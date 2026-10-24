@@ -12,7 +12,7 @@ from app.models.purchases import Order, OrderItem
 from app.services.catalog import like_pattern
 from app.services.errors import ServiceError
 from app.services.payments import payment_data
-from app.services.purchases import PurchaseService
+from app.services.purchases import PurchaseService, order_data
 
 
 def user_data(user: User) -> dict[str, Any]:
@@ -58,12 +58,14 @@ class AdminService:
     async def change_group(self, user_id: UUID, group: UserGroupEnum) -> dict[str, Any]:
         user = await self._user(user_id)
         if user.group.name == UserGroupEnum.ADMIN and group != UserGroupEnum.ADMIN:
-            admins = await self.session.scalar(
-                select(func.count(User.id))
+            # Lock all admin rows so two concurrent demotions cannot both see two admins.
+            admins = await self.session.scalars(
+                select(User.id)
                 .join(UserGroup)
                 .where(UserGroup.name == UserGroupEnum.ADMIN)
+                .with_for_update(of=User)
             )
-            if (admins or 0) <= 1:
+            if len(admins.all()) <= 1:
                 raise ServiceError(409, "Cannot demote the last admin")
         new_group = await self.session.scalar(select(UserGroup).where(UserGroup.name == group))
         if new_group is None:
@@ -106,7 +108,7 @@ class AdminService:
         if date_to is not None:
             query = query.where(Order.created_at <= date_to)
         rows, total = await self._page(query.order_by(Order.created_at.desc()), page, per_page)
-        items = [{**PurchaseService._order_data(order), "user_id": order.user_id} for order in rows]
+        items = [{**order_data(order), "user_id": order.user_id} for order in rows]
         return {"items": items, "total": total, "page": page, "per_page": per_page}
 
     async def payments(

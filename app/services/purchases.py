@@ -11,6 +11,23 @@ from app.models.purchases import Cart, CartItem, Order, OrderItem, OrderStatus
 from app.services.errors import ServiceError
 
 
+def order_data(order: Order) -> dict[str, object]:
+    return {
+        "id": order.id,
+        "status": order.status,
+        "total_amount": order.total_amount,
+        "created_at": order.created_at,
+        "items": [
+            {
+                "movie_id": item.movie_id,
+                "title": item.movie.name,
+                "price_at_order": item.price_at_order,
+            }
+            for item in order.items
+        ],
+    }
+
+
 class PurchaseService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -114,25 +131,17 @@ class PurchaseService:
         return {"order": await self.order(user_id, order.id), "excluded": excluded}
 
     async def _owned_or_pending(self, user_id: UUID, movie_id: UUID) -> bool:
-        paid = await self.session.scalar(
+        found = await self.session.scalar(
             select(OrderItem.id)
             .join(Order)
             .where(
                 Order.user_id == user_id,
                 OrderItem.movie_id == movie_id,
-                Order.status == OrderStatus.PAID,
+                Order.status.in_([OrderStatus.PAID, OrderStatus.PENDING]),
             )
+            .limit(1)
         )
-        pending = await self.session.scalar(
-            select(OrderItem.id)
-            .join(Order)
-            .where(
-                Order.user_id == user_id,
-                OrderItem.movie_id == movie_id,
-                Order.status == OrderStatus.PENDING,
-            )
-        )
-        return paid is not None or pending is not None
+        return found is not None
 
     async def order(self, user_id: UUID, order_id: UUID) -> dict[str, object]:
         order = await self.session.scalar(
@@ -142,24 +151,7 @@ class PurchaseService:
         )
         if order is None:
             raise ServiceError(404, "Order not found")
-        return self._order_data(order)
-
-    @staticmethod
-    def _order_data(order: Order) -> dict[str, object]:
-        return {
-            "id": order.id,
-            "status": order.status,
-            "total_amount": order.total_amount,
-            "created_at": order.created_at,
-            "items": [
-                {
-                    "movie_id": item.movie_id,
-                    "title": item.movie.name,
-                    "price_at_order": item.price_at_order,
-                }
-                for item in order.items
-            ],
-        }
+        return order_data(order)
 
     async def orders(self, user_id: UUID) -> list[dict[str, object]]:
         rows = await self.session.scalars(
@@ -168,7 +160,7 @@ class PurchaseService:
             .where(Order.user_id == user_id)
             .order_by(Order.created_at.desc())
         )
-        return [self._order_data(order) for order in rows.all()]
+        return [order_data(order) for order in rows.all()]
 
     async def cancel_order(self, user_id: UUID, order_id: UUID) -> dict[str, object]:
         order = await self.session.scalar(
