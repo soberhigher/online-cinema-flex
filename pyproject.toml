@@ -1,0 +1,61 @@
+[tool.poetry]
+name = "online-cinema-flex"
+version = "0.1.0"
+description = "Online Cinema FLEX backend: accounts/auth, catalog, favorites, cart, orders, Stripe test payments"
+authors = ["FLEX Student"]
+readme = "README.md"
+packages = [{ include = "app" }]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+fastapi = "^0.115.0"
+uvicorn = { extras = ["standard"], version = "^0.32.0" }
+sqlalchemy = { extras = ["asyncio"], version = "^2.0.36" }
+asyncpg = "^0.30.0"
+alembic = "^1.14.0"
+pydantic = "^2.10.0"
+pydantic-settings = "^2.6.0"
+python-jose = { extras = ["cryptography"], version = "^3.3.0" }
+argon2-cffi = "^23.1.0"
+celery = { extras = ["redis"], version = "^5.4.0" }
+redis = "^5.2.0"
+stripe = "^11.0.0"
+email-validator = "^2.2.0"
+python-multipart = "^0.0.17"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.0"
+pytest-asyncio = "^0.24.0"
+httpx = "^0.28.0"
+coverage = "^7.6.0"
+ruff = "^0.8.0"
+mypy = "^1.13.0"
+types-python-jose = "^3.3.4"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = ["B008"]  # FastAPI Depends() in defaults
+
+[tool.mypy]
+python_version = "3.12"
+plugins = []
+ignore_missing_imports = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+exclude = ["migrations/"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/tasks/celery_app.py"]
