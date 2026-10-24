@@ -4,7 +4,8 @@ from app.core.config import Settings
 def test_default_jwt_secret_is_detected() -> None:
     assert Settings(jwt_secret_key="change-me").uses_default_jwt_secret
     assert Settings(jwt_secret_key="short").uses_default_jwt_secret
-    assert not Settings(jwt_secret_key="a-long-and-random-secret-value").uses_default_jwt_secret
+    assert Settings(jwt_secret_key="a" * 31).uses_default_jwt_secret
+    assert not Settings(jwt_secret_key="a" * 32).uses_default_jwt_secret
 
 
 def test_database_url_is_built_from_parts() -> None:

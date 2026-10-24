@@ -16,7 +16,9 @@ logger = logging.getLogger(__name__)
 
 def create_app() -> FastAPI:
     if settings.uses_default_jwt_secret:
-        logger.warning("JWT_SECRET_KEY is a placeholder or too short; set a strong secret.")
+        if not settings.app_debug:
+            raise RuntimeError("JWT_SECRET_KEY must be at least 32 random characters")
+        logger.warning("Weak JWT_SECRET_KEY, allowed only because APP_DEBUG is on")
     app = FastAPI(
         title="Online Cinema FLEX",
         version="0.1.0",

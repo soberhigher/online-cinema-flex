@@ -13,7 +13,7 @@ FastAPI backend for six FLEX features: accounts/authentication, movie catalog, f
 
 ## Run locally
 
-1. Copy `.env.example` to `.env`. Replace all placeholder values locally. Use a strong `JWT_SECRET_KEY`, a Stripe **test** secret and webhook signing secret; never commit `.env`.
+1. Copy `.env.example` to `.env`. Replace all placeholder values locally. `JWT_SECRET_KEY` must be at least 32 random characters (the API will not start otherwise); also set a Stripe **test** secret and webhook signing secret; never commit `.env`.
 2. Start the stack:
 
    ```sh

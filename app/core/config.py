@@ -48,7 +48,7 @@ class Settings(BaseSettings):
 
     @property
     def uses_default_jwt_secret(self) -> bool:
-        return self.jwt_secret_key in {"change-me", ""} or len(self.jwt_secret_key) < 16
+        return self.jwt_secret_key in {"change-me", ""} or len(self.jwt_secret_key) < 32
 
     @property
     def database_url(self) -> str:
