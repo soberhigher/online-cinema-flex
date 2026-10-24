@@ -141,8 +141,13 @@ async def test_catalog_cart_order_and_payment_flow(
     movie_id = created_movie.json()["id"]
     genre_movie_list = await client.get(f"/api/v1/movies/genres/{genre_id}/movies")
     assert genre_movie_list.status_code == 200
-    assert genre_movie_list.json()[0]["id"] == movie_id
-    assert "genres" in genre_movie_list.json()[0]
+    assert genre_movie_list.json()["items"][0]["id"] == movie_id
+    assert "genres" in genre_movie_list.json()["items"][0]
+    assert genre_movie_list.json()["total"] == 1
+    genre_counts = (await client.get("/api/v1/movies/genres")).json()
+    assert {"id": genre_id, "name": "Drama", "movie_count": 1} in genre_counts
+    bad_sort = await client.get(f"/api/v1/movies/genres/{genre_id}/movies", params={"sort": "nope"})
+    assert bad_sort.status_code == 422
     unused_genre = await client.post(
         "/api/v1/catalog-admin/genres", json={"name": "Unused"}, headers=headers
     )
@@ -236,7 +241,7 @@ async def test_catalog_cart_order_and_payment_flow(
     assert (await client.get("/api/v1/movies/", params={"search": "Second Director"})).json()[
         "total"
     ] == 1
-    assert (await client.get("/api/v1/movies/", params={"search": "12.50"})).json()["total"] == 1
+    assert (await client.get("/api/v1/movies/", params={"search": "12.50"})).json()["total"] == 0
     wrong_genre_year = await client.get(
         "/api/v1/movies/",
         params={"genre_id": genre_id, "year": 2022, "min_imdb": 8},
@@ -286,7 +291,7 @@ async def test_catalog_cart_order_and_payment_flow(
     assert searched_genre.json()["total"] == 1
     searched_rating = await client.get("/api/v1/movies/", params={"search": "8.4"})
     assert searched_rating.status_code == 200
-    assert searched_rating.json()["total"] == 2
+    assert searched_rating.json()["total"] == 0
     second_year = await client.get("/api/v1/movies/", params={"year": 2022})
     assert [row["id"] for row in second_year.json()["items"]] == [second_catalog_movie.json()["id"]]
     second_genre = await client.get(

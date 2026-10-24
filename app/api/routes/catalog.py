@@ -8,7 +8,14 @@ from app.api.dependencies import require_roles
 from app.core.database import get_session
 from app.models.accounts import User, UserGroupEnum
 from app.models.catalog import Certification, Director, Genre, Movie, Star
-from app.schemas.catalog import MovieInput, MovieOut, MoviePage, ReferenceInput, ReferenceOut
+from app.schemas.catalog import (
+    GenreOut,
+    MovieInput,
+    MovieOut,
+    MoviePage,
+    ReferenceInput,
+    ReferenceOut,
+)
 from app.services.auth import AuthError
 from app.services.catalog import CatalogService
 
@@ -36,6 +43,8 @@ PUBLIC_ERRORS: dict[int | str, dict[str, Any]] = {
     422: {"description": "Request validation failed"},
 }
 
+SORT_FIELDS = {"name", "year", "imdb", "price", "votes"}
+
 PUBLIC_VALIDATION: dict[int | str, dict[str, Any]] = {
     422: {"description": "Request validation failed"},
 }
@@ -53,7 +62,7 @@ async def list_movies(
     sort: str = "name",
     descending: bool = False,
 ) -> dict[str, object]:
-    if sort not in {"name", "year", "imdb", "price", "votes"}:
+    if sort not in SORT_FIELDS:
         raise HTTPException(status_code=422, detail="Unsupported sort field")
     return await service.list_movies(
         page=page,
@@ -67,21 +76,30 @@ async def list_movies(
     )
 
 
-@router.get("/api/v1/movies/genres", response_model=list[ReferenceOut], responses=PUBLIC_VALIDATION)
-async def genres(service: Annotated[CatalogService, Depends(service)]) -> list[Genre]:
+@router.get("/api/v1/movies/genres", response_model=list[GenreOut], responses=PUBLIC_VALIDATION)
+async def genres(service: Annotated[CatalogService, Depends(service)]) -> list[dict[str, Any]]:
     return await service.genres()
 
 
 @router.get(
     "/api/v1/movies/genres/{genre_id}/movies",
-    response_model=list[MovieOut],
+    response_model=MoviePage,
     responses=PUBLIC_ERRORS,
 )
 async def genre_movies(
-    genre_id: int, service: Annotated[CatalogService, Depends(service)]
-) -> list[Movie]:
+    genre_id: int,
+    service: Annotated[CatalogService, Depends(service)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    per_page: Annotated[int, Query(ge=1, le=100)] = 20,
+    sort: str = "name",
+    descending: bool = False,
+) -> dict[str, object]:
+    if sort not in SORT_FIELDS:
+        raise HTTPException(status_code=422, detail="Unsupported sort field")
     try:
-        return await service.genre_movies(genre_id)
+        return await service.genre_movies(
+            genre_id, page=page, per_page=per_page, sort=sort, descending=descending
+        )
     except AuthError as exc:
         raise translate(exc) from exc
 
