@@ -154,3 +154,59 @@ async def test_staff_can_filter_orders_payments_and_view_carts(
         "/api/v1/admin/carts/00000000-0000-0000-0000-000000000000", headers=staff
     )
     assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_payment_for_canceled_order_is_recorded(
+    client: AsyncClient,
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = await create_user(db_factory, "late@example.com")
+    headers = bearer(user_id)
+    movie_id = await create_movie(db_factory, "Late Payment", "2.00")
+    await client.post(f"/api/v1/cart/items/{movie_id}", headers=headers)
+    order = (await client.post("/api/v1/orders", headers=headers)).json()["order"]
+    monkeypatch.setattr(
+        stripe.checkout.Session,
+        "create",
+        lambda **_: SimpleNamespace(id="cs_late", url="https://checkout.test"),
+    )
+    assert (
+        await client.post(f"/api/v1/payments/checkout/{order['id']}", headers=headers)
+    ).status_code == 200
+    assert (
+        await client.post(f"/api/v1/orders/{order['id']}/cancel", headers=headers)
+    ).status_code == 200
+
+    expired, expired_sig = signed_webhook(
+        checkout_event(
+            "evt_late_expired",
+            "cs_late",
+            order["id"],
+            user_id,
+            200,
+            event_type="checkout.session.expired",
+            payment_status="unpaid",
+        )
+    )
+    ignored = await client.post("/api/v1/payments/webhook", content=expired, headers=expired_sig)
+    assert ignored.status_code == 200
+    assert ignored.json()["ignored"] is True
+
+    async with db_factory() as session:
+        movie = await session.get(Movie, movie_id)
+        assert movie is not None
+        movie.price = Decimal("9.00")
+        await session.commit()
+
+    paid, paid_sig = signed_webhook(
+        checkout_event("evt_late_paid", "cs_late", order["id"], user_id, 200)
+    )
+    response = await client.post("/api/v1/payments/webhook", content=paid, headers=paid_sig)
+    assert response.status_code == 200
+    assert response.json()["status"] == "successful"
+    detail = await client.get(f"/api/v1/orders/{order['id']}", headers=headers)
+    assert detail.json()["status"] == "paid"
+    [payment] = (await client.get("/api/v1/payments", headers=headers)).json()
+    assert Decimal(payment["amount"]) == Decimal("2.00")
