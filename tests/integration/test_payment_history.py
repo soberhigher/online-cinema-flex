@@ -256,6 +256,12 @@ async def test_expiry_of_superseded_session_keeps_order_payable(
     movie_id = await create_movie(db_factory, "Retry", "3.00")
     await client.post(f"/api/v1/cart/items/{movie_id}", headers=headers)
     order = (await client.post("/api/v1/orders", headers=headers)).json()["order"]
+    # The first session has expired by the time the customer tries again.
+    monkeypatch.setattr(
+        stripe.checkout.Session,
+        "retrieve",
+        lambda session_id: SimpleNamespace(id=session_id, url=None, status="expired"),
+    )
     for session_id in ("cs_old", "cs_new"):
         monkeypatch.setattr(
             stripe.checkout.Session,
@@ -332,3 +338,33 @@ async def test_charge_after_recorded_cancellation_upgrades_payment(
     assert payment["status"] == "successful"
     detail = await client.get(f"/api/v1/orders/{order['id']}", headers=headers)
     assert detail.json()["status"] == "paid"
+
+
+async def test_checkout_reuses_open_session(
+    client: AsyncClient,
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = await create_user(db_factory, "reuse@example.com")
+    headers = bearer(user_id)
+    movie_id = await create_movie(db_factory, "Reuse", "5.00")
+    await client.post(f"/api/v1/cart/items/{movie_id}", headers=headers)
+    order = (await client.post("/api/v1/orders", headers=headers)).json()["order"]
+    created: list[str] = []
+
+    def create(**kwargs: object) -> SimpleNamespace:
+        created.append(str(kwargs["idempotency_key"]))
+        return SimpleNamespace(id="cs_open", url="https://checkout.test/open")
+
+    monkeypatch.setattr(stripe.checkout.Session, "create", create)
+    monkeypatch.setattr(
+        stripe.checkout.Session,
+        "retrieve",
+        lambda session_id: SimpleNamespace(
+            id=session_id, url="https://checkout.test/open", status="open"
+        ),
+    )
+    first = await client.post(f"/api/v1/payments/checkout/{order['id']}", headers=headers)
+    second = await client.post(f"/api/v1/payments/checkout/{order['id']}", headers=headers)
+    assert first.json() == second.json()
+    assert created == [f"checkout:{order['id']}:first"]

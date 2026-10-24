@@ -497,7 +497,8 @@ async def test_catalog_cart_order_and_payment_flow(
         content=wrong_amount_payload,
         headers={"Stripe-Signature": f"t={wrong_amount_timestamp},v1={wrong_amount_signature}"},
     )
-    assert wrong_amount.status_code == 400
+    assert wrong_amount.status_code == 200
+    assert wrong_amount.json()["ignored"] is True
     still_pending = await client.get(f"/api/v1/orders/{order_data['id']}", headers=headers)
     assert still_pending.json()["status"] == "pending"
     original_mail_delay = send_email.delay

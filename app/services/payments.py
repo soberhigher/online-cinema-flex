@@ -68,6 +68,12 @@ class PaymentService:
         if current_total != snapshot_total or current_total != order.total_amount:
             raise ServiceError(409, "Order prices changed; create a new order")
         stripe.api_key = self.settings.stripe_secret_key
+        if order.stripe_checkout_id is not None:
+            previous = await asyncio.to_thread(
+                stripe.checkout.Session.retrieve, order.stripe_checkout_id
+            )
+            if previous.status == "open":
+                return {"checkout_url": previous.url, "checkout_id": previous.id}
         session = await asyncio.to_thread(
             stripe.checkout.Session.create,
             payment_method_types=["card"],
@@ -87,7 +93,9 @@ class PaymentService:
                 }
                 for item in order.items
             ],
-            idempotency_key=f"checkout:{order.id}",
+            # Stripe keeps idempotency keys for 24 hours; tie the key to the previous session
+            # so a double click reuses one session but an expired session gets a fresh one.
+            idempotency_key=f"checkout:{order.id}:{order.stripe_checkout_id or 'first'}",
         )
         order.stripe_checkout_id = session.id
         await self.session.commit()
@@ -160,7 +168,16 @@ class PaymentService:
             return {"received": True, "pending": True}
         expected_cents = int(order.total_amount * 100)
         if is_success and session_data.get("amount_total") != expected_cents:
-            raise ServiceError(400, "Stripe amount does not match order total")
+            # Answering with an error would only make Stripe retry for days. Keep the order
+            # untouched and leave the mismatch to a human.
+            logger.error(
+                "Stripe event %s charged %s cents for order %s, expected %s",
+                event_id,
+                session_data.get("amount_total"),
+                order_id,
+                expected_cents,
+            )
+            return {"received": True, "ignored": True}
         if existing_payment is not None:
             # A canceled attempt was charged after all: upgrade its record.
             payment = existing_payment

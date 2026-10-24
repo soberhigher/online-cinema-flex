@@ -81,7 +81,7 @@ async def checkout(
     summary="Stripe webhook",
     response_model=WebhookResponse,
     responses={
-        400: {"description": "Invalid Stripe signature, payload, amount, or owner"},
+        400: {"description": "Invalid Stripe signature, payload or order owner"},
         409: {"description": "Payment event conflicts with an existing payment"},
         422: {"description": "Request validation failed"},
     },
