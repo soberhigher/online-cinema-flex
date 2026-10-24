@@ -14,6 +14,10 @@ class ReferenceOut(BaseModel):
     name: str
 
 
+class GenreOut(ReferenceOut):
+    movie_count: int
+
+
 class MovieInput(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     year: int = Field(ge=1888, le=2100)

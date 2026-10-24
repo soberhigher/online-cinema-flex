@@ -1,12 +1,12 @@
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import String, cast, delete, func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.catalog import Certification, Director, Genre, Movie, Star
+from app.models.catalog import Certification, Director, Genre, Movie, Star, movie_genres
 from app.models.favorites import Favorite
 from app.models.purchases import CartItem, OrderItem
 from app.schemas.catalog import MovieInput
@@ -51,29 +51,15 @@ class CatalogService:
         if min_imdb is not None:
             query = query.where(Movie.imdb >= min_imdb)
         if search:
+            # Text search over title, description, genre, star and director names only.
             term = f"%{search.strip()}%"
-            if genre_id is None:
-                query = query.outerjoin(Movie.genres)
-            query = (
-                query.outerjoin(Movie.stars)
-                .outerjoin(Movie.directors)
-                .outerjoin(Movie.certification)
-            )
             query = query.where(
                 or_(
                     Movie.name.ilike(term),
                     Movie.description.ilike(term),
-                    Genre.name.ilike(term),
-                    Star.name.ilike(term),
-                    Director.name.ilike(term),
-                    Certification.name.ilike(term),
-                    cast(Movie.year, String).ilike(term),
-                    cast(Movie.time, String).ilike(term),
-                    cast(Movie.imdb, String).ilike(term),
-                    cast(Movie.votes, String).ilike(term),
-                    cast(Movie.metascore, String).ilike(term),
-                    cast(Movie.gross, String).ilike(term),
-                    cast(Movie.price, String).ilike(term),
+                    Movie.genres.any(Genre.name.ilike(term)),
+                    Movie.stars.any(Star.name.ilike(term)),
+                    Movie.directors.any(Director.name.ilike(term)),
                 )
             )
         return query.distinct()
@@ -249,22 +235,17 @@ class CatalogService:
         await self.session.delete(record)
         await self.session.commit()
 
-    async def genres(self) -> list[Genre]:
-        return list((await self.session.scalars(select(Genre).order_by(Genre.name))).all())
+    async def genres(self) -> list[dict[str, Any]]:
+        statement = (
+            select(Genre.id, Genre.name, func.count(movie_genres.c.movie_id))
+            .outerjoin(movie_genres, movie_genres.c.genre_id == Genre.id)
+            .group_by(Genre.id)
+            .order_by(Genre.name)
+        )
+        rows = await self.session.execute(statement)
+        return [{"id": id_, "name": name, "movie_count": count} for id_, name, count in rows]
 
-    async def genre_movies(self, genre_id: int, **kwargs: Any) -> list[Movie]:
+    async def genre_movies(self, genre_id: int, **kwargs: Any) -> dict[str, object]:
         if await self.session.get(Genre, genre_id) is None:
             raise AuthError(404, "Genre not found")
-        statement = (
-            select(Movie)
-            .join(Movie.genres)
-            .where(Genre.id == genre_id)
-            .options(
-                selectinload(Movie.genres),
-                selectinload(Movie.stars),
-                selectinload(Movie.directors),
-                selectinload(Movie.certification),
-            )
-            .order_by(Movie.name)
-        )
-        return list((await self.session.scalars(statement)).all())
+        return await self.list_movies(genre_id=genre_id, **kwargs)
