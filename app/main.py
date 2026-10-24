@@ -5,7 +5,7 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import JSONResponse
 
 from app.api.dependencies import get_current_user
-from app.api.routes import auth, catalog, favorites, health
+from app.api.routes import auth, catalog, favorites, health, purchases
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -28,6 +28,8 @@ def create_app() -> FastAPI:
     app.include_router(catalog.router)
     app.include_router(catalog.admin)
     app.include_router(favorites.router)
+    app.include_router(purchases.cart_router)
+    app.include_router(purchases.order_router)
 
     @app.get("/openapi.json", include_in_schema=False)
     async def openapi(user: Annotated[Any, Depends(get_current_user)]) -> JSONResponse:
