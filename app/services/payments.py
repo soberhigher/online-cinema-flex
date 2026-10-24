@@ -89,6 +89,8 @@ class PaymentService:
             ],
             idempotency_key=f"checkout:{order.id}",
         )
+        order.stripe_checkout_id = session.id
+        await self.session.commit()
         return {"checkout_url": session.url, "checkout_id": session.id}
 
     async def webhook(self, payload: bytes, signature: str) -> dict[str, Any]:
@@ -132,11 +134,18 @@ class PaymentService:
             "checkout.session.async_payment_succeeded",
         }
         is_success = is_paid_event and session_data.get("payment_status") == "paid"
+        checkout_id = str(session_data["id"])
+        if not is_paid_event and order.stripe_checkout_id not in (None, checkout_id):
+            # An older session expired while a newer one is still open for this order.
+            return {"received": True, "ignored": True}
+        existing_payment: Payment | None = None
         if order.status != OrderStatus.PENDING:
             existing_payment = await self.session.scalar(
                 select(Payment).where(Payment.order_id == order_id)
             )
-            if existing_payment is not None:
+            if existing_payment is not None and (
+                existing_payment.status == PaymentStatus.SUCCESSFUL or not is_success
+            ):
                 return {"received": True, "duplicate": True}
             if not is_success:
                 return {"received": True, "ignored": True}
@@ -152,19 +161,26 @@ class PaymentService:
         expected_cents = int(order.total_amount * 100)
         if is_success and session_data.get("amount_total") != expected_cents:
             raise AuthError(400, "Stripe amount does not match order total")
-        checkout_id = str(session_data["id"])
-        payment = Payment(
-            order_id=order.id,
-            user_id=user_id,
-            status=PaymentStatus.SUCCESSFUL if is_success else PaymentStatus.CANCELED,
-            amount=order.total_amount,
-            stripe_checkout_id=checkout_id,
-            stripe_event_id=event_id,
-            items=[
-                PaymentItem(movie_id=item.movie_id, price_at_payment=item.price_at_order)
-                for item in order.items
-            ],
-        )
+        if existing_payment is not None:
+            # A canceled attempt was charged after all: upgrade its record.
+            payment = existing_payment
+            payment.status = PaymentStatus.SUCCESSFUL
+            payment.stripe_event_id = event_id
+            payment.stripe_checkout_id = checkout_id
+            payment.amount = order.total_amount
+        else:
+            payment = Payment(
+                order_id=order.id,
+                user_id=user_id,
+                status=PaymentStatus.SUCCESSFUL if is_success else PaymentStatus.CANCELED,
+                amount=order.total_amount,
+                stripe_checkout_id=checkout_id,
+                stripe_event_id=event_id,
+                items=[
+                    PaymentItem(movie_id=item.movie_id, price_at_payment=item.price_at_order)
+                    for item in order.items
+                ],
+            )
         if is_success:
             order.status = OrderStatus.PAID
         else:

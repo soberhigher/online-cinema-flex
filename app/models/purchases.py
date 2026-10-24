@@ -45,6 +45,8 @@ class Order(Base):
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     status: Mapped[OrderStatus] = mapped_column(String(16), default=OrderStatus.PENDING)
     total_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # Latest Stripe Checkout session; events from older sessions must not cancel the order.
+    stripe_checkout_id: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     items: Mapped[list["OrderItem"]] = relationship(
         back_populates="order", cascade="all, delete-orphan"
