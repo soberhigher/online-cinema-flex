@@ -9,7 +9,7 @@ from app.core.database import get_session
 from app.models.accounts import User, UserGroupEnum
 from app.services.auth import AuthError, AuthService
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
 
 
 async def get_auth_service(session: AsyncSession = Depends(get_session)) -> AuthService:

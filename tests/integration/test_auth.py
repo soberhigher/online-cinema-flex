@@ -283,6 +283,9 @@ async def test_catalog_crud_filters_and_favorites(
     assert docs.status_code == 200
     assert "SwaggerUIBundle" in docs.text
     assert (await client.get("/openapi.json", headers=headers)).status_code == 200
+    openapi_schema = (await client.get("/openapi.json", headers=headers)).json()
+    oauth_scheme = openapi_schema["components"]["securitySchemes"]["OAuth2PasswordBearer"]
+    assert oauth_scheme["flows"]["password"]["tokenUrl"] == "/api/v1/auth/token"
     assert (
         await client.post("/api/v1/catalog-admin/genres", json={"name": "Drama"})
     ).status_code == 401
@@ -310,6 +313,22 @@ async def test_catalog_crud_filters_and_favorites(
     )
     assert created_movie.status_code == 201
     movie_id = created_movie.json()["id"]
+    genre_movie_list = await client.get(f"/api/v1/movies/genres/{genre_id}/movies")
+    assert genre_movie_list.status_code == 200
+    assert genre_movie_list.json()[0]["id"] == movie_id
+    assert "genres" in genre_movie_list.json()[0]
+    unused_genre = await client.post(
+        "/api/v1/catalog-admin/genres", json={"name": "Unused"}, headers=headers
+    )
+    assert unused_genre.status_code == 201
+    assert (
+        await client.delete(
+            f"/api/v1/catalog-admin/genres/{unused_genre.json()['id']}", headers=headers
+        )
+    ).status_code == 204
+    assert (
+        await client.delete(f"/api/v1/catalog-admin/genres/{genre_id}", headers=headers)
+    ).status_code == 409
     assert (await client.post(f"/api/v1/favorites/{movie_id}")).status_code == 401
     duplicate = await client.post("/api/v1/catalog-admin/movies", json=movie_data, headers=headers)
     assert duplicate.status_code == 409
@@ -363,7 +382,7 @@ async def test_catalog_crud_filters_and_favorites(
     assert order_data["items"][0]["price_at_order"] == "9.99"
     assert (await client.get("/api/v1/cart", headers=headers)).json()["items"] == []
     assert (await client.post(f"/api/v1/cart/items/{movie_id}", headers=headers)).status_code == 409
-    checkout_ids = iter(["cs_test_example", "cs_test_canceled"])
+    checkout_ids = iter(["cs_test_example", "cs_test_canceled", "cs_test_delayed"])
     monkeypatch.setattr(
         stripe.checkout.Session,
         "create",
@@ -489,6 +508,85 @@ async def test_catalog_crud_filters_and_favorites(
     assert (
         await client.post(f"/api/v1/orders/{pending_id}/cancel", headers=headers)
     ).status_code == 409
+    delayed_movie = await client.post(
+        "/api/v1/catalog-admin/movies",
+        json=dict(movie_data, name="Delayed Payment", year=2022),
+        headers=headers,
+    )
+    assert delayed_movie.status_code == 201
+    delayed_movie_id = delayed_movie.json()["id"]
+    await client.post(f"/api/v1/cart/items/{delayed_movie_id}", headers=headers)
+    delayed_order = await client.post("/api/v1/orders", headers=headers)
+    delayed_order_data = delayed_order.json()["order"]
+    delayed_checkout = await client.post(
+        f"/api/v1/payments/checkout/{delayed_order_data['id']}", headers=headers
+    )
+    assert delayed_checkout.status_code == 200
+    delayed_metadata = {"order_id": delayed_order_data["id"], "user_id": str(user_id)}
+    unpaid_event = {
+        "id": "evt_test_delayed_unpaid",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_test_delayed",
+                "amount_total": 999,
+                "payment_status": "unpaid",
+                "metadata": delayed_metadata,
+            }
+        },
+    }
+    unpaid_payload = json.dumps(unpaid_event, separators=(",", ":")).encode()
+    unpaid_timestamp = int(time.time())
+    unpaid_signed = str(unpaid_timestamp).encode() + b"." + unpaid_payload
+    unpaid_signature = hmac.new(
+        get_settings().stripe_webhook_secret.encode(), unpaid_signed, hashlib.sha256
+    ).hexdigest()
+    unpaid_response = await client.post(
+        "/api/v1/payments/webhook",
+        content=unpaid_payload,
+        headers={"Stripe-Signature": f"t={unpaid_timestamp},v1={unpaid_signature}"},
+    )
+    assert unpaid_response.status_code == 200
+    assert unpaid_response.json()["pending"] is True
+    unpaid_order = await client.get(f"/api/v1/orders/{delayed_order_data['id']}", headers=headers)
+    assert unpaid_order.json()["status"] == "pending"
+    success_event = {
+        "id": "evt_test_delayed_success",
+        "type": "checkout.session.async_payment_succeeded",
+        "data": {
+            "object": {
+                "id": "cs_test_delayed",
+                "amount_total": 999,
+                "payment_status": "paid",
+                "metadata": delayed_metadata,
+            }
+        },
+    }
+    success_payload = json.dumps(success_event, separators=(",", ":")).encode()
+    success_timestamp = int(time.time())
+    success_signed = str(success_timestamp).encode() + b"." + success_payload
+    success_signature = hmac.new(
+        get_settings().stripe_webhook_secret.encode(), success_signed, hashlib.sha256
+    ).hexdigest()
+    success_response = await client.post(
+        "/api/v1/payments/webhook",
+        content=success_payload,
+        headers={"Stripe-Signature": f"t={success_timestamp},v1={success_signature}"},
+    )
+    assert success_response.status_code == 200
+    assert success_response.json()["status"] == "successful"
+    race_movie = await client.post(
+        "/api/v1/catalog-admin/movies",
+        json=dict(movie_data, name="Order Race", year=2021),
+        headers=headers,
+    )
+    race_movie_id = race_movie.json()["id"]
+    await client.post(f"/api/v1/cart/items/{race_movie_id}", headers=headers)
+    concurrent_orders = await asyncio.gather(
+        client.post("/api/v1/orders", headers=headers),
+        client.post("/api/v1/orders", headers=headers),
+    )
+    assert sorted(response.status_code for response in concurrent_orders) == [201, 409]
     async with test_session_factory() as session:
         cart_row = await session.scalar(select(Cart).where(Cart.user_id == user_id))
         assert cart_row is not None

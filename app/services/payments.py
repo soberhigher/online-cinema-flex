@@ -40,6 +40,7 @@ class PaymentService:
             raise AuthError(409, "Order prices changed; create a new order")
         stripe.api_key = self.settings.stripe_secret_key
         session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
             mode="payment",
             success_url=self.settings.stripe_success_url,
             cancel_url=self.settings.stripe_cancel_url,
@@ -76,6 +77,7 @@ class PaymentService:
         event_type = str(event["type"])
         if event_type not in {
             "checkout.session.completed",
+            "checkout.session.async_payment_succeeded",
             "checkout.session.expired",
             "checkout.session.async_payment_failed",
         }:
@@ -102,10 +104,13 @@ class PaymentService:
             if existing_payment is not None:
                 return {"received": True, "duplicate": True}
             raise AuthError(409, "Order is no longer pending")
-        is_success = (
-            event_type == "checkout.session.completed"
-            and session_data.get("payment_status") == "paid"
-        )
+        is_paid_event = event_type in {
+            "checkout.session.completed",
+            "checkout.session.async_payment_succeeded",
+        }
+        is_success = is_paid_event and session_data.get("payment_status") == "paid"
+        if is_paid_event and not is_success:
+            return {"received": True, "pending": True}
         expected_cents = int(order.total_amount * 100)
         if is_success and session_data.get("amount_total") != expected_cents:
             raise AuthError(400, "Stripe amount does not match order total")

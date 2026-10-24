@@ -14,14 +14,19 @@ class PurchaseService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def _cart(self, user_id: UUID, *, create: bool = False) -> Cart | None:
-        cart = await self.session.scalar(
+    async def _cart(
+        self, user_id: UUID, *, create: bool = False, lock: bool = False
+    ) -> Cart | None:
+        statement = (
             select(Cart)
             .options(
                 selectinload(Cart.items).selectinload(CartItem.movie).selectinload(Movie.genres)
             )
             .where(Cart.user_id == user_id)
         )
+        if lock:
+            statement = statement.with_for_update()
+        cart = await self.session.scalar(statement)
         if cart is None and create:
             cart = Cart(user_id=user_id, items=[])
             self.session.add(cart)
@@ -53,7 +58,7 @@ class PurchaseService:
             raise AuthError(404, "Movie not found")
         if await self._owned_or_pending(user_id, movie_id):
             raise AuthError(409, "Movie is already purchased or pending payment")
-        cart = await self._cart(user_id, create=True)
+        cart = await self._cart(user_id, create=True, lock=True)
         assert cart is not None
         if any(item.movie_id == movie_id for item in cart.items):
             raise AuthError(409, "Movie is already in the cart")
@@ -62,7 +67,7 @@ class PurchaseService:
         return {"message": "Added to cart"}
 
     async def remove_from_cart(self, user_id: UUID, movie_id: UUID) -> None:
-        cart = await self._cart(user_id)
+        cart = await self._cart(user_id, lock=True)
         item = (
             None
             if cart is None
@@ -74,14 +79,14 @@ class PurchaseService:
         await self.session.commit()
 
     async def clear_cart(self, user_id: UUID) -> None:
-        cart = await self._cart(user_id)
+        cart = await self._cart(user_id, lock=True)
         if cart is not None:
             for item in list(cart.items):
                 await self.session.delete(item)
             await self.session.commit()
 
     async def create_order(self, user_id: UUID) -> dict[str, object]:
-        cart = await self._cart(user_id, create=False)
+        cart = await self._cart(user_id, lock=True)
         if cart is None or not cart.items:
             raise AuthError(409, "Cart is empty")
         eligible: list[CartItem] = []
@@ -162,7 +167,7 @@ class PurchaseService:
 
     async def cancel_order(self, user_id: UUID, order_id: UUID) -> dict[str, object]:
         order = await self.session.scalar(
-            select(Order).where(Order.id == order_id, Order.user_id == user_id)
+            select(Order).where(Order.id == order_id, Order.user_id == user_id).with_for_update()
         )
         if order is None:
             raise AuthError(404, "Order not found")

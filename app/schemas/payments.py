@@ -10,5 +10,6 @@ class WebhookResponse(BaseModel):
     received: bool
     duplicate: bool | None = None
     ignored: bool | None = None
+    pending: bool | None = None
     payment_id: str | None = None
     status: str | None = None

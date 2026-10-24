@@ -107,6 +107,7 @@ class CatalogService:
                     selectinload(Movie.genres),
                     selectinload(Movie.stars),
                     selectinload(Movie.directors),
+                    selectinload(Movie.certification),
                 )
                 .order_by(ordering, Movie.id)
                 .offset((page - 1) * per_page)
@@ -234,7 +235,15 @@ class CatalogService:
         record = await self.session.get(model, object_id)
         if record is None:
             raise AuthError(404, "Reference not found")
-        if record.movies:
+        if model is Certification:
+            usage = select(Movie.id).where(Movie.certification_id == object_id).limit(1)
+        elif model is Genre:
+            usage = select(Movie.id).join(Movie.genres).where(Genre.id == object_id).limit(1)
+        elif model is Star:
+            usage = select(Movie.id).join(Movie.stars).where(Star.id == object_id).limit(1)
+        else:
+            usage = select(Movie.id).join(Movie.directors).where(Director.id == object_id).limit(1)
+        if await self.session.scalar(usage) is not None:
             raise AuthError(409, "Reference is used by movies")
         await self.session.delete(record)
         await self.session.commit()
@@ -245,5 +254,16 @@ class CatalogService:
     async def genre_movies(self, genre_id: int, **kwargs: Any) -> list[Movie]:
         if await self.session.get(Genre, genre_id) is None:
             raise AuthError(404, "Genre not found")
-        query = self.movie_query(genre_id=genre_id, **kwargs)
-        return list((await self.session.scalars(query.options(selectinload(Movie.genres)))).all())
+        statement = (
+            select(Movie)
+            .join(Movie.genres)
+            .where(Genre.id == genre_id)
+            .options(
+                selectinload(Movie.genres),
+                selectinload(Movie.stars),
+                selectinload(Movie.directors),
+                selectinload(Movie.certification),
+            )
+            .order_by(Movie.name)
+        )
+        return list((await self.session.scalars(statement)).all())
