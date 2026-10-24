@@ -33,17 +33,26 @@ jobs:
       STRIPE_WEBHOOK_SECRET: whsec_ci_placeholder
     steps:
       - uses: actions/checkout@v4
+      # Poetry must be installed before setup-python can use `cache: poetry`.
+      - name: Install Poetry
+        run: pipx install poetry==2.5.1
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: poetry
-      - name: Install Poetry
-        run: pip install poetry==2.5.1
       - name: Install dependencies
-        run: poetry install --with dev
-      - name: Ruff
+        run: poetry install --with dev --no-interaction
+      - name: Ruff lint
         run: poetry run ruff check .
+      - name: Ruff format
+        run: poetry run ruff format --check .
       - name: Mypy
         run: poetry run mypy app
       - name: Pytest with coverage
-        run: poetry run pytest --cov=app --cov-report=term-missing
+        run: poetry run pytest --cov=app --cov-report=term-missing --cov-report=xml --cov-fail-under=80
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml

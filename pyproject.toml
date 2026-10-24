@@ -60,3 +60,10 @@ testpaths = ["tests"]
 [tool.coverage.run]
 source = ["app"]
 omit = ["app/tasks/celery_app.py"]
+# SQLAlchemy asyncio runs DB calls through greenlet; without this setting
+# coverage loses every line executed after the first awaited query.
+concurrency = ["greenlet", "thread"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
