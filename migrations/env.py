@@ -22,8 +22,8 @@ if config.attributes.get("connection") is None:
 
 # add your model's MetaData object here
 # for 'autogenerate' support
-from app.core.database import Base  # noqa: E402
 import app.models  # noqa: E402, F401  # ensure models are registered
+from app.core.database import Base  # noqa: E402
 
 target_metadata = Base.metadata
 

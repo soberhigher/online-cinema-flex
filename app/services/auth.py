@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import delete, select
@@ -28,10 +29,10 @@ from app.tasks.auth_tasks import send_email
 
 
 class AuthError(Exception):
-    def __init__(self, status_code: int, detail: str) -> None:
+    def __init__(self, status_code: int, detail: Any) -> None:
         self.status_code = status_code
         self.detail = detail
-        super().__init__(detail)
+        super().__init__(str(detail))
 
 
 class AuthService:
