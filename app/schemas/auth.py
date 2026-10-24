@@ -6,6 +6,13 @@ class Credentials(BaseModel):
     password: str = Field(min_length=12, max_length=128)
 
 
+class LoginRequest(BaseModel):
+    """Login does not re-check the password policy: a wrong password is a 401, not a 422."""
+
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=128)
+
+
 class EmailRequest(BaseModel):
     email: EmailStr
 

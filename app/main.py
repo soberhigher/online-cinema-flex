@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI
@@ -9,9 +10,12 @@ from app.api.routes import auth, catalog, favorites, health, payments, purchases
 from app.core.config import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
+    if settings.uses_default_jwt_secret:
+        logger.warning("JWT_SECRET_KEY is a placeholder or too short; set a strong secret.")
     app = FastAPI(
         title="Online Cinema FLEX",
         version="0.1.0",

@@ -21,7 +21,6 @@ async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_factory() as session:
         try:
-            await session.commit()
             yield session
         except Exception:
             await session.rollback()
