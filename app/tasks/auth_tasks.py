@@ -13,7 +13,11 @@ from app.core.config import get_settings
 from app.models.accounts import ActivationToken
 
 
-@shared_task
+@shared_task(
+    autoretry_for=(OSError, smtplib.SMTPException),
+    retry_backoff=30,
+    retry_kwargs={"max_retries": 5},
+)
 def send_email(to_address: str, subject: str, body: str) -> None:
     settings = get_settings()
     message = EmailMessage()
