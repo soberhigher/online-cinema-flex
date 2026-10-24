@@ -1,3 +1,4 @@
+import asyncio
 import smtplib
 from datetime import UTC, datetime
 from email.message import EmailMessage
@@ -6,6 +7,7 @@ from typing import cast
 from celery import shared_task
 from sqlalchemy import delete
 from sqlalchemy.engine import CursorResult
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
 from app.models.accounts import ActivationToken
@@ -23,24 +25,25 @@ def send_email(to_address: str, subject: str, body: str) -> None:
         smtp.send_message(message)
 
 
+async def _purge_expired_activation_tokens() -> int:
+    settings = get_settings()
+    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            result = cast(
+                CursorResult[tuple[object, ...]],
+                await session.execute(
+                    delete(ActivationToken).where(ActivationToken.expires_at < datetime.now(UTC))
+                ),
+            )
+            await session.commit()
+            return result.rowcount or 0
+    finally:
+        await engine.dispose()
+
+
 @shared_task
 def purge_expired_activation_tokens() -> int:
     """Remove expired activation tokens; users can request a fresh token."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-
-    settings = get_settings()
-    sync_url = settings.database_url_sync
-    engine = create_engine(sync_url, pool_pre_ping=True)
-    session_factory = sessionmaker(engine)
-    with session_factory() as session:
-        result = cast(
-            CursorResult[tuple[object, ...]],
-            session.execute(
-                delete(ActivationToken).where(ActivationToken.expires_at < datetime.now(UTC))
-            ),
-        )
-        session.commit()
-        deleted = result.rowcount or 0
-    engine.dispose()
-    return deleted
+    return asyncio.run(_purge_expired_activation_tokens())

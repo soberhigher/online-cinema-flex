@@ -1,7 +1,7 @@
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import String, cast, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -52,7 +52,13 @@ class CatalogService:
             query = query.where(Movie.imdb >= min_imdb)
         if search:
             term = f"%{search.strip()}%"
-            query = query.outerjoin(Movie.genres).outerjoin(Movie.stars).outerjoin(Movie.directors)
+            if genre_id is None:
+                query = query.outerjoin(Movie.genres)
+            query = (
+                query.outerjoin(Movie.stars)
+                .outerjoin(Movie.directors)
+                .outerjoin(Movie.certification)
+            )
             query = query.where(
                 or_(
                     Movie.name.ilike(term),
@@ -60,6 +66,14 @@ class CatalogService:
                     Genre.name.ilike(term),
                     Star.name.ilike(term),
                     Director.name.ilike(term),
+                    Certification.name.ilike(term),
+                    cast(Movie.year, String).ilike(term),
+                    cast(Movie.time, String).ilike(term),
+                    cast(Movie.imdb, String).ilike(term),
+                    cast(Movie.votes, String).ilike(term),
+                    cast(Movie.metascore, String).ilike(term),
+                    cast(Movie.gross, String).ilike(term),
+                    cast(Movie.price, String).ilike(term),
                 )
             )
         return query.distinct()
@@ -136,7 +150,15 @@ class CatalogService:
         return await self.get_movie(movie.id)
 
     async def update_movie(self, movie_id: UUID, data: MovieInput) -> Movie:
-        movie = await self.session.get(Movie, movie_id)
+        movie = await self.session.scalar(
+            select(Movie)
+            .options(
+                selectinload(Movie.genres),
+                selectinload(Movie.stars),
+                selectinload(Movie.directors),
+            )
+            .where(Movie.id == movie_id)
+        )
         if movie is None:
             raise AuthError(404, "Movie not found")
         if (

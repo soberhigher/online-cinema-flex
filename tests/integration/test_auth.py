@@ -1,17 +1,36 @@
 import asyncio
+import hashlib
+import hmac
+import json
 import os
 import re
+import time
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.core.config import get_settings
 from app.core.database import get_session
+from app.core.security import create_access_token
 from app.main import app
+from app.models.accounts import (
+    ActivationToken,
+    PasswordResetToken,
+    User,
+    UserGroup,
+    UserGroupEnum,
+)
+from app.models.payments import Payment
+from app.models.purchases import Cart, CartItem
 from app.tasks.auth_tasks import send_email
 
 TEST_DATABASE_URL = os.getenv(
@@ -19,6 +38,7 @@ TEST_DATABASE_URL = os.getenv(
     "postgresql+asyncpg://cinema:changeme@localhost:5432/cinema_test",
 )
 queued_emails: list[tuple[str, str, str]] = []
+test_session_factory: async_sessionmaker | None = None
 
 
 @pytest_asyncio.fixture
@@ -31,8 +51,10 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
     config = Config("alembic.ini")
     config.set_main_option("sqlalchemy.url", TEST_DATABASE_URL.replace("%", "%%"))
     await asyncio.to_thread(command.upgrade, config, "head")
+    global test_session_factory
     engine = create_async_engine(TEST_DATABASE_URL)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+    test_session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    factory = test_session_factory
 
     async def override_session():
         async with factory() as session:
@@ -57,6 +79,16 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
 async def test_registration_activation_refresh_and_logout(client: AsyncClient) -> None:
     email = "auth-flow@example.com"
     password = "StrongPassword9!"
+    malformed_refresh = await client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": "not-a-jwt"}
+    )
+    assert malformed_refresh.status_code == 401
+    malformed_logout = await client.post("/api/v1/auth/logout", json={"refresh_token": "not-a-jwt"})
+    assert malformed_logout.status_code == 401
+    malformed_access = await client.get(
+        "/api/v1/favorites", headers={"Authorization": "Bearer not-a-jwt"}
+    )
+    assert malformed_access.status_code == 401
     registered = await client.post(
         "/api/v1/auth/register", json={"email": email, "password": password}
     )
@@ -82,10 +114,27 @@ async def test_registration_activation_refresh_and_logout(client: AsyncClient) -
             params={"token": first_activation.group(1)},
         )
     ).status_code == 400
+    async with test_session_factory() as session:
+        resend_user = await session.scalar(select(User).where(User.email == resend_email))
+        assert resend_user is not None
+        active_token = await session.get(ActivationToken, resend_user.id)
+        assert active_token is not None
+        active_token.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
     assert (
         await client.get(
             "/api/v1/auth/activate",
             params={"token": second_activation.group(1)},
+        )
+    ).status_code == 400
+    await client.post("/api/v1/auth/resend-activation", json={"email": resend_email})
+    third_activation = re.search(r"token=([A-Za-z0-9_-]+)", queued_emails[-1][2])
+    assert third_activation is not None
+    assert third_activation.group(1) != second_activation.group(1)
+    assert (
+        await client.get(
+            "/api/v1/auth/activate",
+            params={"token": third_activation.group(1)},
         )
     ).status_code == 200
 
@@ -117,6 +166,21 @@ async def test_registration_activation_refresh_and_logout(client: AsyncClient) -
     assert forgotten.status_code == 200
     reset_match = re.search(r"Reset token: ([A-Za-z0-9_-]+)", queued_emails[-1][2])
     assert reset_match is not None
+    async with test_session_factory() as session:
+        reset_user = await session.scalar(select(User).where(User.email == email))
+        assert reset_user is not None
+        reset_row = await session.get(PasswordResetToken, reset_user.id)
+        assert reset_row is not None
+        reset_row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+    expired_reset = await client.post(
+        "/api/v1/auth/reset-password",
+        json={"token": reset_match.group(1), "new_password": "ChangedPassword9!"},
+    )
+    assert expired_reset.status_code == 400
+    await client.post("/api/v1/auth/forgot-password", json={"email": email})
+    reset_match = re.search(r"Reset token: ([A-Za-z0-9_-]+)", queued_emails[-1][2])
+    assert reset_match is not None
     reset = await client.post(
         "/api/v1/auth/reset-password",
         json={"token": reset_match.group(1), "new_password": "ChangedPassword9!"},
@@ -125,10 +189,29 @@ async def test_registration_activation_refresh_and_logout(client: AsyncClient) -
     assert (
         await client.post("/api/v1/auth/login", json={"email": email, "password": password})
     ).status_code == 401
+    changed_login = await client.post(
+        "/api/v1/auth/login", json={"email": email, "password": "ChangedPassword9!"}
+    )
+    assert changed_login.status_code == 200
+    access = changed_login.json()["access_token"]
+    change = await client.post(
+        "/api/v1/auth/change-password",
+        json={"old_password": "ChangedPassword9!", "new_password": "AfterChange9!"},
+        headers={"Authorization": f"Bearer {access}"},
+    )
+    assert change.status_code == 200
+    revoked = await client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": changed_login.json()["refresh_token"]},
+    )
+    assert revoked.status_code == 401
     assert (
         await client.post(
             "/api/v1/auth/login", json={"email": email, "password": "ChangedPassword9!"}
         )
+    ).status_code == 401
+    assert (
+        await client.post("/api/v1/auth/login", json={"email": email, "password": "AfterChange9!"})
     ).status_code == 200
 
 
@@ -146,3 +229,273 @@ def test_auth_routes_are_registered_in_openapi() -> None:
         "/api/v1/auth/reset-password",
     }
     assert expected <= set(paths)
+
+
+@pytest.mark.asyncio
+async def test_catalog_crud_filters_and_favorites(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import stripe
+
+    assert test_session_factory is not None
+    async with test_session_factory() as session:
+        group = await session.scalar(
+            select(UserGroup).where(UserGroup.name == UserGroupEnum.MODERATOR)
+        )
+        assert group is not None
+        moderator = User(
+            email="catalog-mod@example.com",
+            password_hash="unused",
+            group_id=group.id,
+            is_active=True,
+        )
+        session.add(moderator)
+        await session.commit()
+        user_id = moderator.id
+    access_token, _ = create_access_token(str(user_id), UserGroupEnum.MODERATOR.value)
+    headers = {"Authorization": f"Bearer {access_token}"}
+    assert (await client.post("/api/v1/orders", headers=headers)).status_code == 409
+    async with test_session_factory() as session:
+        user_group = await session.scalar(
+            select(UserGroup).where(UserGroup.name == UserGroupEnum.USER)
+        )
+        assert user_group is not None
+        regular_user = User(
+            email="catalog-user@example.com",
+            password_hash="unused",
+            group_id=user_group.id,
+            is_active=True,
+        )
+        session.add(regular_user)
+        await session.commit()
+        regular_user_id = regular_user.id
+    regular_token, _ = create_access_token(str(regular_user_id), UserGroupEnum.USER.value)
+    regular_headers = {"Authorization": f"Bearer {regular_token}"}
+    denied_admin = await client.post(
+        "/api/v1/catalog-admin/genres",
+        json={"name": "Forbidden Genre"},
+        headers=regular_headers,
+    )
+    assert denied_admin.status_code == 403
+    assert (await client.get("/docs")).status_code == 401
+    assert (await client.get("/openapi.json")).status_code == 401
+    docs = await client.get("/docs", headers=headers)
+    assert docs.status_code == 200
+    assert "SwaggerUIBundle" in docs.text
+    assert (await client.get("/openapi.json", headers=headers)).status_code == 200
+    assert (
+        await client.post("/api/v1/catalog-admin/genres", json={"name": "Drama"})
+    ).status_code == 401
+    created_genre = await client.post(
+        "/api/v1/catalog-admin/genres", json={"name": "Drama"}, headers=headers
+    )
+    assert created_genre.status_code == 201
+    assert (
+        await client.post("/api/v1/catalog-admin/genres", json={"name": "Drama"}, headers=headers)
+    ).status_code == 409
+    genre_id = created_genre.json()["id"]
+    movie_data = {
+        "name": "Example Film",
+        "year": 2024,
+        "time": 120,
+        "imdb": 8.4,
+        "votes": 10,
+        "price": "9.99",
+        "genre_ids": [genre_id],
+        "star_ids": [],
+        "director_ids": [],
+    }
+    created_movie = await client.post(
+        "/api/v1/catalog-admin/movies", json=movie_data, headers=headers
+    )
+    assert created_movie.status_code == 201
+    movie_id = created_movie.json()["id"]
+    assert (await client.post(f"/api/v1/favorites/{movie_id}")).status_code == 401
+    duplicate = await client.post("/api/v1/catalog-admin/movies", json=movie_data, headers=headers)
+    assert duplicate.status_code == 409
+    updated_data = dict(movie_data, description="Updated description")
+    updated_movie = await client.put(
+        f"/api/v1/catalog-admin/movies/{movie_id}", json=updated_data, headers=headers
+    )
+    assert updated_movie.status_code == 200
+    assert updated_movie.json()["description"] == "Updated description"
+    searched_genre = await client.get("/api/v1/movies/", params={"search": "Drama"})
+    assert searched_genre.status_code == 200
+    assert searched_genre.json()["total"] == 1
+    searched_rating = await client.get("/api/v1/movies/", params={"search": "8.4"})
+    assert searched_rating.status_code == 200
+    assert searched_rating.json()["total"] == 1
+    filtered = await client.get(
+        "/api/v1/movies/",
+        params={"genre_id": genre_id, "year": 2024, "min_imdb": 8, "sort": "price"},
+    )
+    assert filtered.status_code == 200
+    assert filtered.json()["total"] == 1
+    assert filtered.json()["items"][0]["id"] == movie_id
+    assert (await client.get(f"/api/v1/movies/{movie_id}")).status_code == 200
+    assert (await client.post(f"/api/v1/favorites/{movie_id}", headers=headers)).status_code == 201
+    assert (await client.post(f"/api/v1/favorites/{movie_id}", headers=headers)).status_code == 409
+    favorite_list = await client.get("/api/v1/favorites", headers=headers)
+    assert favorite_list.status_code == 200
+    assert favorite_list.json()["total"] == 1
+    assert (
+        await client.delete(f"/api/v1/favorites/{movie_id}", headers=headers)
+    ).status_code == 204
+    assert (
+        await client.delete(f"/api/v1/favorites/{movie_id}", headers=headers)
+    ).status_code == 404
+    assert (await client.get("/api/v1/cart", headers=headers)).json()["total"] == "0.00"
+    assert (await client.post(f"/api/v1/cart/items/{movie_id}", headers=headers)).status_code == 201
+    assert (await client.post(f"/api/v1/cart/items/{movie_id}", headers=headers)).status_code == 409
+    blocked_delete = await client.delete(
+        f"/api/v1/catalog-admin/movies/{movie_id}", headers=headers
+    )
+    assert blocked_delete.status_code == 409
+    cart = await client.get("/api/v1/cart", headers=headers)
+    assert cart.status_code == 200
+    assert cart.json()["items"][0]["title"] == "Example Film"
+    assert cart.json()["total"] == "9.99"
+    order_response = await client.post("/api/v1/orders", headers=headers)
+    assert order_response.status_code == 201
+    order_data = order_response.json()["order"]
+    assert order_data["status"] == "pending"
+    assert order_data["total_amount"] == "9.99"
+    assert order_data["items"][0]["price_at_order"] == "9.99"
+    assert (await client.get("/api/v1/cart", headers=headers)).json()["items"] == []
+    assert (await client.post(f"/api/v1/cart/items/{movie_id}", headers=headers)).status_code == 409
+    checkout_ids = iter(["cs_test_example", "cs_test_canceled"])
+    monkeypatch.setattr(
+        stripe.checkout.Session,
+        "create",
+        lambda **kwargs: SimpleNamespace(
+            id=next(checkout_ids), url="https://checkout.test/session"
+        ),
+    )
+    checkout = await client.post(f"/api/v1/payments/checkout/{order_data['id']}", headers=headers)
+    assert checkout.status_code == 200
+    assert checkout.json()["checkout_id"] == "cs_test_example"
+
+    event = {
+        "id": "evt_test_success",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_test_example",
+                "amount_total": 999,
+                "payment_status": "paid",
+                "metadata": {"order_id": order_data["id"], "user_id": str(user_id)},
+            }
+        },
+    }
+    payload = json.dumps(event, separators=(",", ":")).encode()
+    timestamp = int(time.time())
+    signed_payload = str(timestamp).encode() + b"." + payload
+    signature = hmac.new(
+        get_settings().stripe_webhook_secret.encode(), signed_payload, hashlib.sha256
+    ).hexdigest()
+    signature_header = f"t={timestamp},v1={signature}"
+    rejected_webhook = await client.post(
+        "/api/v1/payments/webhook",
+        content=payload,
+        headers={"Stripe-Signature": f"t={timestamp},v1=invalid"},
+    )
+    assert rejected_webhook.status_code == 400
+    webhook = await client.post(
+        "/api/v1/payments/webhook",
+        content=payload,
+        headers={"Stripe-Signature": signature_header},
+    )
+    assert webhook.status_code == 200
+    assert webhook.json()["status"] == "successful"
+    paid_delete = await client.delete(f"/api/v1/catalog-admin/movies/{movie_id}", headers=headers)
+    assert paid_delete.status_code == 409
+    repeated = await client.post(
+        "/api/v1/payments/webhook",
+        content=payload,
+        headers={"Stripe-Signature": signature_header},
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["duplicate"] is True
+    assert (
+        await client.post(f"/api/v1/orders/{order_data['id']}/cancel", headers=headers)
+    ).status_code == 409
+    async with test_session_factory() as session:
+        payment_count = await session.scalar(select(func.count()).select_from(Payment))
+    assert payment_count == 1
+    second_movie_data = dict(movie_data, name="Canceled Example", year=2023)
+    second_movie = await client.post(
+        "/api/v1/catalog-admin/movies", json=second_movie_data, headers=headers
+    )
+    assert second_movie.status_code == 201
+    second_movie_id = second_movie.json()["id"]
+    assert (
+        await client.post(f"/api/v1/cart/items/{second_movie_id}", headers=headers)
+    ).status_code == 201
+    second_order = await client.post("/api/v1/orders", headers=headers)
+    assert second_order.status_code == 201
+    second_order_data = second_order.json()["order"]
+    second_checkout = await client.post(
+        f"/api/v1/payments/checkout/{second_order_data['id']}", headers=headers
+    )
+    assert second_checkout.status_code == 200
+    canceled_event = {
+        "id": "evt_test_canceled",
+        "type": "checkout.session.expired",
+        "data": {
+            "object": {
+                "id": "cs_test_canceled",
+                "metadata": {"order_id": second_order_data["id"], "user_id": str(user_id)},
+            }
+        },
+    }
+    canceled_payload = json.dumps(canceled_event, separators=(",", ":")).encode()
+    canceled_timestamp = int(time.time())
+    canceled_signed = str(canceled_timestamp).encode() + b"." + canceled_payload
+    canceled_signature = hmac.new(
+        get_settings().stripe_webhook_secret.encode(), canceled_signed, hashlib.sha256
+    ).hexdigest()
+    canceled_response = await client.post(
+        "/api/v1/payments/webhook",
+        content=canceled_payload,
+        headers={"Stripe-Signature": f"t={canceled_timestamp},v1={canceled_signature}"},
+    )
+    assert canceled_response.status_code == 200
+    assert canceled_response.json()["status"] == "canceled"
+    canceled_order = await client.get(f"/api/v1/orders/{second_order_data['id']}", headers=headers)
+    assert canceled_order.json()["status"] == "canceled"
+    assert len((await client.get("/api/v1/orders", headers=headers)).json()) == 2
+    assert (
+        await client.get(f"/api/v1/orders/{second_order_data['id']}", headers=regular_headers)
+    ).status_code == 404
+    assert (
+        await client.post(f"/api/v1/cart/items/{second_movie_id}", headers=headers)
+    ).status_code == 201
+    assert (
+        await client.delete(f"/api/v1/cart/items/{second_movie_id}", headers=headers)
+    ).status_code == 204
+    assert (
+        await client.delete(f"/api/v1/cart/items/{second_movie_id}", headers=headers)
+    ).status_code == 404
+    await client.post(f"/api/v1/cart/items/{second_movie_id}", headers=headers)
+    assert (await client.delete("/api/v1/cart", headers=headers)).status_code == 204
+    assert (await client.get("/api/v1/cart", headers=headers)).json()["items"] == []
+    await client.post(f"/api/v1/cart/items/{second_movie_id}", headers=headers)
+    pending_order = await client.post("/api/v1/orders", headers=headers)
+    assert pending_order.status_code == 201
+    pending_id = pending_order.json()["order"]["id"]
+    pending_cancel = await client.post(f"/api/v1/orders/{pending_id}/cancel", headers=headers)
+    assert pending_cancel.status_code == 200
+    assert pending_cancel.json()["status"] == "canceled"
+    assert (
+        await client.post(f"/api/v1/orders/{pending_id}/cancel", headers=headers)
+    ).status_code == 409
+    async with test_session_factory() as session:
+        cart_row = await session.scalar(select(Cart).where(Cart.user_id == user_id))
+        assert cart_row is not None
+        session.add(CartItem(cart_id=cart_row.id, movie_id=UUID(movie_id)))
+        await session.commit()
+    stale_order = await client.post("/api/v1/orders", headers=headers)
+    assert stale_order.status_code == 409
+    assert stale_order.json()["detail"]["excluded"] == [
+        {"movie_id": movie_id, "reason": "purchased_or_pending"}
+    ]
