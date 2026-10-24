@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     app_port: int = 8000
     app_debug: bool = False
     api_v1_prefix: str = "/api/v1"
+    # Public base URL used to build links in emails (activation, password reset).
+    app_base_url: str = "http://localhost:8000"
 
     # Database
     postgres_host: str = "db"
@@ -43,6 +45,10 @@ class Settings(BaseSettings):
     stripe_webhook_secret: str = "whsec_placeholder"
     stripe_success_url: str = "http://localhost:8000/api/v1/payments/success"
     stripe_cancel_url: str = "http://localhost:8000/api/v1/payments/cancel"
+
+    @property
+    def uses_default_jwt_secret(self) -> bool:
+        return self.jwt_secret_key in {"change-me", ""} or len(self.jwt_secret_key) < 16
 
     @property
     def database_url(self) -> str:

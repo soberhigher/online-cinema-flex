@@ -8,6 +8,7 @@ from app.models.accounts import User
 from app.schemas.auth import (
     Credentials,
     EmailRequest,
+    LoginRequest,
     MessageResponse,
     PasswordChange,
     PasswordReset,
@@ -78,7 +79,7 @@ async def resend_activation(
     },
 )
 async def login(
-    body: Credentials, service: Annotated[AuthService, Depends(get_auth_service)]
+    body: LoginRequest, service: Annotated[AuthService, Depends(get_auth_service)]
 ) -> dict[str, str]:
     try:
         return await service.login(body.email, body.password)

@@ -1,8 +1,10 @@
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -28,6 +30,8 @@ from app.models.accounts import (
 )
 from app.tasks.auth_tasks import send_email
 
+logger = logging.getLogger(__name__)
+
 
 class AuthError(Exception):
     def __init__(self, status_code: int, detail: Any) -> None:
@@ -40,6 +44,29 @@ class AuthService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.settings = get_settings()
+
+    def _activation_link(self, raw: str) -> str:
+        base = self.settings.app_base_url.rstrip("/")
+        return f"{base}{self.settings.api_v1_prefix}/auth/activate?token={raw}"
+
+    @staticmethod
+    def _queue_email(to_address: str, subject: str, body: str) -> None:
+        """Queue an email; a broker outage must not fail an already committed request."""
+        try:
+            send_email.delay(to_address, subject, body)
+        except Exception:
+            logger.exception("Failed to queue email %r to %s", subject, to_address)
+
+    async def authenticate(self, email: str, password: str) -> User | None:
+        """Return the active user for valid credentials, otherwise None."""
+        user = await self.session.scalar(
+            select(User)
+            .options(selectinload(User.group))
+            .where(User.email == email.strip().lower())
+        )
+        if user is None or not user.is_active or not verify_password(password, user.password_hash):
+            return None
+        return user
 
     async def _group_id(self, name: UserGroupEnum) -> int:
         group = await self.session.scalar(select(UserGroup).where(UserGroup.name == name))
@@ -59,15 +86,20 @@ class AuthService:
             is_active=False,
         )
         self.session.add(user)
-        await self.session.flush()
         raw, digest = new_opaque_token()
         expires = datetime.now(UTC) + timedelta(hours=self.settings.activation_token_ttl_hours)
-        self.session.add(ActivationToken(user_id=user.id, token_hash=digest, expires_at=expires))
-        await self.session.commit()
-        send_email.delay(
-            normalized_email,
-            "Activate your Online Cinema account",
-            f"http://localhost:8000/api/v1/auth/activate?token={raw}",
+        try:
+            await self.session.flush()
+            self.session.add(
+                ActivationToken(user_id=user.id, token_hash=digest, expires_at=expires)
+            )
+            await self.session.commit()
+        except IntegrityError as exc:
+            # Two concurrent registrations with the same email: the unique index wins.
+            await self.session.rollback()
+            raise AuthError(409, "An account with this email already exists") from exc
+        self._queue_email(
+            normalized_email, "Activate your Online Cinema account", self._activation_link(raw)
         )
         return {"message": "Registration accepted. Check your email for an activation link."}
 
@@ -97,10 +129,8 @@ class AuthService:
                 ActivationToken(user_id=user.id, token_hash=digest, expires_at=expires)
             )
             await self.session.commit()
-            send_email.delay(
-                user.email,
-                "Activate your Online Cinema account",
-                f"http://localhost:8000/api/v1/auth/activate?token={raw}",
+            self._queue_email(
+                user.email, "Activate your Online Cinema account", self._activation_link(raw)
             )
         return {"message": "If the account can be activated, an email has been sent."}
 
@@ -176,7 +206,12 @@ class AuthService:
                 PasswordResetToken(user_id=user.id, token_hash=digest, expires_at=expires)
             )
             await self.session.commit()
-            send_email.delay(user.email, "Reset your Online Cinema password", f"Reset token: {raw}")
+            self._queue_email(
+                user.email,
+                "Reset your Online Cinema password",
+                f"Reset token: {raw}\n\nSend it to POST {self.settings.app_base_url}"
+                f"{self.settings.api_v1_prefix}/auth/reset-password together with a new password.",
+            )
         return {"message": "If the account exists, a password reset email has been sent."}
 
     async def reset_password(self, raw: str, new: str) -> dict[str, str]:

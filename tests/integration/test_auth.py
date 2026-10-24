@@ -181,3 +181,39 @@ async def test_registration_activation_refresh_and_logout(
     assert (
         await client.post("/api/v1/auth/login", json={"email": email, "password": "AfterChange9!"})
     ).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_login_errors_and_mail_outage_do_not_break_registration(
+    client: AsyncClient,
+) -> None:
+    # A short wrong password is a credentials error, not a policy violation.
+    short = await client.post(
+        "/api/v1/auth/login", json={"email": "nobody@example.com", "password": "short"}
+    )
+    assert short.status_code == 401
+
+    from app.tasks.auth_tasks import send_email
+
+    original = send_email.delay
+
+    def broken_delay(*args: object) -> None:
+        raise RuntimeError("broker down")
+
+    send_email.delay = broken_delay
+    try:
+        registered = await client.post(
+            "/api/v1/auth/register",
+            json={"email": "outage@example.com", "password": "StrongPassword9!"},
+        )
+    finally:
+        send_email.delay = original
+    # The account is stored even though the email could not be queued...
+    assert registered.status_code == 201
+    # ...and the user can ask for a new activation link.
+    resent = await client.post(
+        "/api/v1/auth/resend-activation", json={"email": "outage@example.com"}
+    )
+    assert resent.status_code == 200
+    assert queued_emails[-1][0] == "outage@example.com"
+    assert "/api/v1/auth/activate?token=" in queued_emails[-1][2]
