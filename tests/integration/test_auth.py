@@ -6,6 +6,7 @@ import os
 import re
 import time
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -21,7 +22,13 @@ from app.core.config import get_settings
 from app.core.database import get_session
 from app.core.security import create_access_token
 from app.main import app
-from app.models.accounts import User, UserGroup, UserGroupEnum
+from app.models.accounts import (
+    ActivationToken,
+    PasswordResetToken,
+    User,
+    UserGroup,
+    UserGroupEnum,
+)
 from app.models.payments import Payment
 from app.models.purchases import Cart, CartItem
 from app.tasks.auth_tasks import send_email
@@ -72,6 +79,16 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
 async def test_registration_activation_refresh_and_logout(client: AsyncClient) -> None:
     email = "auth-flow@example.com"
     password = "StrongPassword9!"
+    malformed_refresh = await client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": "not-a-jwt"}
+    )
+    assert malformed_refresh.status_code == 401
+    malformed_logout = await client.post("/api/v1/auth/logout", json={"refresh_token": "not-a-jwt"})
+    assert malformed_logout.status_code == 401
+    malformed_access = await client.get(
+        "/api/v1/favorites", headers={"Authorization": "Bearer not-a-jwt"}
+    )
+    assert malformed_access.status_code == 401
     registered = await client.post(
         "/api/v1/auth/register", json={"email": email, "password": password}
     )
@@ -97,10 +114,27 @@ async def test_registration_activation_refresh_and_logout(client: AsyncClient) -
             params={"token": first_activation.group(1)},
         )
     ).status_code == 400
+    async with test_session_factory() as session:
+        resend_user = await session.scalar(select(User).where(User.email == resend_email))
+        assert resend_user is not None
+        active_token = await session.get(ActivationToken, resend_user.id)
+        assert active_token is not None
+        active_token.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
     assert (
         await client.get(
             "/api/v1/auth/activate",
             params={"token": second_activation.group(1)},
+        )
+    ).status_code == 400
+    await client.post("/api/v1/auth/resend-activation", json={"email": resend_email})
+    third_activation = re.search(r"token=([A-Za-z0-9_-]+)", queued_emails[-1][2])
+    assert third_activation is not None
+    assert third_activation.group(1) != second_activation.group(1)
+    assert (
+        await client.get(
+            "/api/v1/auth/activate",
+            params={"token": third_activation.group(1)},
         )
     ).status_code == 200
 
@@ -132,6 +166,21 @@ async def test_registration_activation_refresh_and_logout(client: AsyncClient) -
     assert forgotten.status_code == 200
     reset_match = re.search(r"Reset token: ([A-Za-z0-9_-]+)", queued_emails[-1][2])
     assert reset_match is not None
+    async with test_session_factory() as session:
+        reset_user = await session.scalar(select(User).where(User.email == email))
+        assert reset_user is not None
+        reset_row = await session.get(PasswordResetToken, reset_user.id)
+        assert reset_row is not None
+        reset_row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+    expired_reset = await client.post(
+        "/api/v1/auth/reset-password",
+        json={"token": reset_match.group(1), "new_password": "ChangedPassword9!"},
+    )
+    assert expired_reset.status_code == 400
+    await client.post("/api/v1/auth/forgot-password", json={"email": email})
+    reset_match = re.search(r"Reset token: ([A-Za-z0-9_-]+)", queued_emails[-1][2])
+    assert reset_match is not None
     reset = await client.post(
         "/api/v1/auth/reset-password",
         json={"token": reset_match.group(1), "new_password": "ChangedPassword9!"},
@@ -140,10 +189,29 @@ async def test_registration_activation_refresh_and_logout(client: AsyncClient) -
     assert (
         await client.post("/api/v1/auth/login", json={"email": email, "password": password})
     ).status_code == 401
+    changed_login = await client.post(
+        "/api/v1/auth/login", json={"email": email, "password": "ChangedPassword9!"}
+    )
+    assert changed_login.status_code == 200
+    access = changed_login.json()["access_token"]
+    change = await client.post(
+        "/api/v1/auth/change-password",
+        json={"old_password": "ChangedPassword9!", "new_password": "AfterChange9!"},
+        headers={"Authorization": f"Bearer {access}"},
+    )
+    assert change.status_code == 200
+    revoked = await client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": changed_login.json()["refresh_token"]},
+    )
+    assert revoked.status_code == 401
     assert (
         await client.post(
             "/api/v1/auth/login", json={"email": email, "password": "ChangedPassword9!"}
         )
+    ).status_code == 401
+    assert (
+        await client.post("/api/v1/auth/login", json={"email": email, "password": "AfterChange9!"})
     ).status_code == 200
 
 
@@ -186,6 +254,35 @@ async def test_catalog_crud_filters_and_favorites(
         user_id = moderator.id
     access_token, _ = create_access_token(str(user_id), UserGroupEnum.MODERATOR.value)
     headers = {"Authorization": f"Bearer {access_token}"}
+    assert (await client.post("/api/v1/orders", headers=headers)).status_code == 409
+    async with test_session_factory() as session:
+        user_group = await session.scalar(
+            select(UserGroup).where(UserGroup.name == UserGroupEnum.USER)
+        )
+        assert user_group is not None
+        regular_user = User(
+            email="catalog-user@example.com",
+            password_hash="unused",
+            group_id=user_group.id,
+            is_active=True,
+        )
+        session.add(regular_user)
+        await session.commit()
+        regular_user_id = regular_user.id
+    regular_token, _ = create_access_token(str(regular_user_id), UserGroupEnum.USER.value)
+    regular_headers = {"Authorization": f"Bearer {regular_token}"}
+    denied_admin = await client.post(
+        "/api/v1/catalog-admin/genres",
+        json={"name": "Forbidden Genre"},
+        headers=regular_headers,
+    )
+    assert denied_admin.status_code == 403
+    assert (await client.get("/docs")).status_code == 401
+    assert (await client.get("/openapi.json")).status_code == 401
+    docs = await client.get("/docs", headers=headers)
+    assert docs.status_code == 200
+    assert "SwaggerUIBundle" in docs.text
+    assert (await client.get("/openapi.json", headers=headers)).status_code == 200
     assert (
         await client.post("/api/v1/catalog-admin/genres", json={"name": "Drama"})
     ).status_code == 401
@@ -193,6 +290,9 @@ async def test_catalog_crud_filters_and_favorites(
         "/api/v1/catalog-admin/genres", json={"name": "Drama"}, headers=headers
     )
     assert created_genre.status_code == 201
+    assert (
+        await client.post("/api/v1/catalog-admin/genres", json={"name": "Drama"}, headers=headers)
+    ).status_code == 409
     genre_id = created_genre.json()["id"]
     movie_data = {
         "name": "Example Film",
@@ -210,8 +310,21 @@ async def test_catalog_crud_filters_and_favorites(
     )
     assert created_movie.status_code == 201
     movie_id = created_movie.json()["id"]
+    assert (await client.post(f"/api/v1/favorites/{movie_id}")).status_code == 401
     duplicate = await client.post("/api/v1/catalog-admin/movies", json=movie_data, headers=headers)
     assert duplicate.status_code == 409
+    updated_data = dict(movie_data, description="Updated description")
+    updated_movie = await client.put(
+        f"/api/v1/catalog-admin/movies/{movie_id}", json=updated_data, headers=headers
+    )
+    assert updated_movie.status_code == 200
+    assert updated_movie.json()["description"] == "Updated description"
+    searched_genre = await client.get("/api/v1/movies/", params={"search": "Drama"})
+    assert searched_genre.status_code == 200
+    assert searched_genre.json()["total"] == 1
+    searched_rating = await client.get("/api/v1/movies/", params={"search": "8.4"})
+    assert searched_rating.status_code == 200
+    assert searched_rating.json()["total"] == 1
     filtered = await client.get(
         "/api/v1/movies/",
         params={"genre_id": genre_id, "year": 2024, "min_imdb": 8, "sort": "price"},
@@ -294,6 +407,8 @@ async def test_catalog_crud_filters_and_favorites(
     )
     assert webhook.status_code == 200
     assert webhook.json()["status"] == "successful"
+    paid_delete = await client.delete(f"/api/v1/catalog-admin/movies/{movie_id}", headers=headers)
+    assert paid_delete.status_code == 409
     repeated = await client.post(
         "/api/v1/payments/webhook",
         content=payload,
@@ -348,6 +463,32 @@ async def test_catalog_crud_filters_and_favorites(
     assert canceled_response.json()["status"] == "canceled"
     canceled_order = await client.get(f"/api/v1/orders/{second_order_data['id']}", headers=headers)
     assert canceled_order.json()["status"] == "canceled"
+    assert len((await client.get("/api/v1/orders", headers=headers)).json()) == 2
+    assert (
+        await client.get(f"/api/v1/orders/{second_order_data['id']}", headers=regular_headers)
+    ).status_code == 404
+    assert (
+        await client.post(f"/api/v1/cart/items/{second_movie_id}", headers=headers)
+    ).status_code == 201
+    assert (
+        await client.delete(f"/api/v1/cart/items/{second_movie_id}", headers=headers)
+    ).status_code == 204
+    assert (
+        await client.delete(f"/api/v1/cart/items/{second_movie_id}", headers=headers)
+    ).status_code == 404
+    await client.post(f"/api/v1/cart/items/{second_movie_id}", headers=headers)
+    assert (await client.delete("/api/v1/cart", headers=headers)).status_code == 204
+    assert (await client.get("/api/v1/cart", headers=headers)).json()["items"] == []
+    await client.post(f"/api/v1/cart/items/{second_movie_id}", headers=headers)
+    pending_order = await client.post("/api/v1/orders", headers=headers)
+    assert pending_order.status_code == 201
+    pending_id = pending_order.json()["order"]["id"]
+    pending_cancel = await client.post(f"/api/v1/orders/{pending_id}/cancel", headers=headers)
+    assert pending_cancel.status_code == 200
+    assert pending_cancel.json()["status"] == "canceled"
+    assert (
+        await client.post(f"/api/v1/orders/{pending_id}/cancel", headers=headers)
+    ).status_code == 409
     async with test_session_factory() as session:
         cart_row = await session.scalar(select(Cart).where(Cart.user_id == user_id))
         assert cart_row is not None

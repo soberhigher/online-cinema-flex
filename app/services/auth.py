@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.core.security import (
+    InvalidTokenError,
     create_access_token,
     create_refresh_token,
     decode_token,
@@ -121,7 +122,10 @@ class AuthService:
         return {"access_token": access, "refresh_token": refresh, "token_type": "bearer"}
 
     async def refresh(self, raw: str) -> dict[str, str]:
-        payload = decode_token(raw, "refresh")
+        try:
+            payload = decode_token(raw, "refresh")
+        except InvalidTokenError as exc:
+            raise AuthError(401, "Refresh token is invalid") from exc
         token = await self.session.scalar(
             select(RefreshToken).where(RefreshToken.jti == payload.get("jti"))
         )
@@ -136,7 +140,10 @@ class AuthService:
         return {"access_token": access, "refresh_token": raw, "token_type": "bearer"}
 
     async def logout(self, raw: str) -> dict[str, str]:
-        payload = decode_token(raw, "refresh")
+        try:
+            payload = decode_token(raw, "refresh")
+        except InvalidTokenError as exc:
+            raise AuthError(401, "Refresh token is invalid") from exc
         token = await self.session.scalar(
             select(RefreshToken).where(RefreshToken.jti == payload.get("jti"))
         )
@@ -189,7 +196,10 @@ class AuthService:
         return {"message": "Password reset"}
 
     async def current_user(self, encoded: str) -> User:
-        payload = decode_token(encoded, "access")
+        try:
+            payload = decode_token(encoded, "access")
+        except InvalidTokenError as exc:
+            raise AuthError(401, "Invalid access token") from exc
         try:
             user_id = UUID(payload["sub"])
         except (KeyError, ValueError) as exc:
