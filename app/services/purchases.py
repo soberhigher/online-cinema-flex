@@ -2,6 +2,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -28,10 +29,13 @@ class PurchaseService:
             statement = statement.with_for_update()
         cart = await self.session.scalar(statement)
         if cart is None and create:
-            cart = Cart(user_id=user_id, items=[])
-            self.session.add(cart)
-            await self.session.flush()
-            return cart
+            try:
+                async with self.session.begin_nested():
+                    cart = Cart(user_id=user_id, items=[])
+                    self.session.add(cart)
+            except IntegrityError:
+                # A concurrent request created the user's first cart; use that one.
+                cart = await self.session.scalar(statement)
         return cart
 
     async def cart(self, user_id: UUID) -> dict[str, object]:

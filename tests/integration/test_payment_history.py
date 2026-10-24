@@ -6,10 +6,13 @@ from uuid import UUID
 import pytest
 import stripe
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models.accounts import UserGroupEnum
 from app.models.catalog import Movie
+from app.models.purchases import Cart
+from app.services.purchases import PurchaseService
 from tests.helpers import bearer, checkout_event, create_user, signed_webhook
 
 
@@ -210,3 +213,33 @@ async def test_payment_for_canceled_order_is_recorded(
     assert detail.json()["status"] == "paid"
     [payment] = (await client.get("/api/v1/payments", headers=headers)).json()
     assert Decimal(payment["amount"]) == Decimal("2.00")
+
+
+@pytest.mark.asyncio
+async def test_first_cart_insert_race_reuses_existing_cart(
+    db_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user_id = await create_user(db_factory, "racer@example.com")
+    async with db_factory() as session:
+        service = PurchaseService(session)
+        original_scalar = session.scalar
+        calls = 0
+
+        async def racing_scalar(statement: Any, *args: Any, **kwargs: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                # Another request inserts the cart right after our lookup missed it.
+                async with db_factory() as other:
+                    other.add(Cart(user_id=user_id))
+                    await other.commit()
+                return None
+            return await original_scalar(statement, *args, **kwargs)
+
+        monkeypatch.setattr(session, "scalar", racing_scalar)
+        cart = await service._cart(user_id, create=True)
+        assert cart is not None
+        assert cart.user_id == user_id
+    async with db_factory() as session:
+        carts = (await session.scalars(select(Cart).where(Cart.user_id == user_id))).all()
+    assert len(carts) == 1
