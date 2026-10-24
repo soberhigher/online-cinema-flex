@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -24,7 +24,24 @@ def translate(exc: AuthError) -> HTTPException:
     return HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 
-@router.get("/api/v1/movies/", response_model=MoviePage)
+AUTH_ERRORS: dict[int | str, dict[str, Any]] = {
+    401: {"description": "Authentication required or access token is invalid"},
+    403: {"description": "Insufficient role permissions"},
+    404: {"description": "Requested catalog item or reference was not found"},
+    409: {"description": "Catalog item conflicts with existing references or purchases"},
+    422: {"description": "Request validation failed"},
+}
+PUBLIC_ERRORS: dict[int | str, dict[str, Any]] = {
+    404: {"description": "Requested catalog item was not found"},
+    422: {"description": "Request validation failed"},
+}
+
+PUBLIC_VALIDATION: dict[int | str, dict[str, Any]] = {
+    422: {"description": "Request validation failed"},
+}
+
+
+@router.get("/api/v1/movies/", response_model=MoviePage, responses=PUBLIC_ERRORS)
 async def list_movies(
     service: Annotated[CatalogService, Depends(service)],
     page: Annotated[int, Query(ge=1)] = 1,
@@ -50,12 +67,16 @@ async def list_movies(
     )
 
 
-@router.get("/api/v1/movies/genres", response_model=list[ReferenceOut])
+@router.get("/api/v1/movies/genres", response_model=list[ReferenceOut], responses=PUBLIC_VALIDATION)
 async def genres(service: Annotated[CatalogService, Depends(service)]) -> list[Genre]:
     return await service.genres()
 
 
-@router.get("/api/v1/movies/genres/{genre_id}/movies", response_model=list[MovieOut])
+@router.get(
+    "/api/v1/movies/genres/{genre_id}/movies",
+    response_model=list[MovieOut],
+    responses=PUBLIC_ERRORS,
+)
 async def genre_movies(
     genre_id: int, service: Annotated[CatalogService, Depends(service)]
 ) -> list[Movie]:
@@ -65,7 +86,7 @@ async def genre_movies(
         raise translate(exc) from exc
 
 
-@router.get("/api/v1/movies/{movie_id}", response_model=MovieOut)
+@router.get("/api/v1/movies/{movie_id}", response_model=MovieOut, responses=PUBLIC_ERRORS)
 async def movie_detail(
     movie_id: UUID, service: Annotated[CatalogService, Depends(service)]
 ) -> Movie:
@@ -75,7 +96,9 @@ async def movie_detail(
         raise translate(exc) from exc
 
 
-@admin.post("/movies", response_model=MovieOut, status_code=status.HTTP_201_CREATED)
+@admin.post(
+    "/movies", response_model=MovieOut, status_code=status.HTTP_201_CREATED, responses=AUTH_ERRORS
+)
 async def create_movie(
     data: MovieInput,
     service: Annotated[CatalogService, Depends(service)],
@@ -87,7 +110,7 @@ async def create_movie(
         raise translate(exc) from exc
 
 
-@admin.put("/movies/{movie_id}", response_model=MovieOut)
+@admin.put("/movies/{movie_id}", response_model=MovieOut, responses=AUTH_ERRORS)
 async def update_movie(
     movie_id: UUID,
     data: MovieInput,
@@ -100,7 +123,7 @@ async def update_movie(
         raise translate(exc) from exc
 
 
-@admin.delete("/movies/{movie_id}", status_code=status.HTTP_204_NO_CONTENT)
+@admin.delete("/movies/{movie_id}", status_code=status.HTTP_204_NO_CONTENT, responses=AUTH_ERRORS)
 async def delete_movie(
     movie_id: UUID,
     service: Annotated[CatalogService, Depends(service)],
@@ -112,7 +135,7 @@ async def delete_movie(
         raise translate(exc) from exc
 
 
-@admin.get("/movies", response_model=MoviePage)
+@admin.get("/movies", response_model=MoviePage, responses=AUTH_ERRORS)
 async def admin_list_movies(
     service: Annotated[CatalogService, Depends(service)],
     _: Annotated[User, Depends(require_roles(UserGroupEnum.MODERATOR))],
@@ -137,7 +160,12 @@ def reference_model(resource: str) -> type:
     return model
 
 
-@admin.post("/{resource}", response_model=ReferenceOut, status_code=status.HTTP_201_CREATED)
+@admin.post(
+    "/{resource}",
+    response_model=ReferenceOut,
+    status_code=status.HTTP_201_CREATED,
+    responses=AUTH_ERRORS,
+)
 async def create_reference(
     resource: str,
     data: ReferenceInput,
@@ -150,7 +178,7 @@ async def create_reference(
         raise translate(exc) from exc
 
 
-@admin.put("/{resource}/{object_id}", response_model=ReferenceOut)
+@admin.put("/{resource}/{object_id}", response_model=ReferenceOut, responses=AUTH_ERRORS)
 async def update_reference(
     resource: str,
     object_id: int,
@@ -164,7 +192,7 @@ async def update_reference(
         raise translate(exc) from exc
 
 
-@admin.get("/{resource}", response_model=list[ReferenceOut])
+@admin.get("/{resource}", response_model=list[ReferenceOut], responses=AUTH_ERRORS)
 async def list_references(
     resource: str,
     service: Annotated[CatalogService, Depends(service)],
@@ -173,7 +201,9 @@ async def list_references(
     return await service.reference_rows(reference_model(resource))
 
 
-@admin.delete("/{resource}/{object_id}", status_code=status.HTTP_204_NO_CONTENT)
+@admin.delete(
+    "/{resource}/{object_id}", status_code=status.HTTP_204_NO_CONTENT, responses=AUTH_ERRORS
+)
 async def delete_reference(
     resource: str,
     object_id: int,

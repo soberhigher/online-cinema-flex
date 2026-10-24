@@ -123,6 +123,7 @@ class CatalogService:
                 selectinload(Movie.genres),
                 selectinload(Movie.stars),
                 selectinload(Movie.directors),
+                selectinload(Movie.certification),
             )
             .where(Movie.id == movie_id)
         )
@@ -131,17 +132,17 @@ class CatalogService:
         return movie
 
     async def create_movie(self, data: MovieInput) -> Movie:
+        if (
+            data.certification_id is not None
+            and await self.session.get(Certification, data.certification_id) is None
+        ):
+            raise AuthError(404, "Certification not found")
         movie = Movie(
             **data.model_dump(exclude={"genre_ids", "star_ids", "director_ids"}),
             genres=await self._references(Genre, data.genre_ids),
             stars=await self._references(Star, data.star_ids),
             directors=await self._references(Director, data.director_ids),
         )
-        if (
-            data.certification_id is not None
-            and await self.session.get(Certification, data.certification_id) is None
-        ):
-            raise AuthError(404, "Certification not found")
         self.session.add(movie)
         try:
             await self.session.commit()

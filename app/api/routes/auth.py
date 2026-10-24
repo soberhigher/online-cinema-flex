@@ -58,7 +58,11 @@ async def activate(
         _raise_http(exc)
 
 
-@router.post("/resend-activation", response_model=MessageResponse)
+@router.post(
+    "/resend-activation",
+    response_model=MessageResponse,
+    responses={422: {"description": "Request validation failed"}},
+)
 async def resend_activation(
     body: EmailRequest, service: Annotated[AuthService, Depends(get_auth_service)]
 ) -> dict[str, str]:
@@ -107,7 +111,14 @@ async def refresh(
         _raise_http(exc)
 
 
-@router.post("/logout", response_model=MessageResponse)
+@router.post(
+    "/logout",
+    response_model=MessageResponse,
+    responses={
+        401: {"description": "Invalid or revoked refresh token"},
+        422: {"description": "Request validation failed"},
+    },
+)
 async def logout(
     body: RefreshRequest, service: Annotated[AuthService, Depends(get_auth_service)]
 ) -> dict[str, str]:
@@ -120,7 +131,11 @@ async def logout(
 @router.post(
     "/change-password",
     response_model=MessageResponse,
-    responses={400: {"description": "Incorrect old password or policy violation"}},
+    responses={
+        400: {"description": "Incorrect old password or policy violation"},
+        401: {"description": "Authentication required"},
+        422: {"description": "Request validation failed"},
+    },
 )
 async def change_password(
     body: PasswordChange,
@@ -135,7 +150,11 @@ async def change_password(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.post("/forgot-password", response_model=MessageResponse)
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    responses={422: {"description": "Request validation failed"}},
+)
 async def forgot_password(
     body: EmailRequest, service: Annotated[AuthService, Depends(get_auth_service)]
 ) -> dict[str, str]:

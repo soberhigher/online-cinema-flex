@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -14,8 +14,15 @@ from app.services.purchases import PurchaseService
 cart_router = APIRouter(prefix="/api/v1/cart", tags=["shopping cart"])
 order_router = APIRouter(prefix="/api/v1/orders", tags=["orders"])
 
+AUTH_RESPONSES: dict[int | str, dict[str, Any]] = {
+    401: {"description": "Authentication required or access token is invalid"},
+    404: {"description": "Cart item or order was not found"},
+    409: {"description": "Cart or order state conflicts with this operation"},
+    422: {"description": "Request validation failed"},
+}
 
-@cart_router.get("", response_model=CartResponse)
+
+@cart_router.get("", response_model=CartResponse, responses=AUTH_RESPONSES)
 async def get_cart(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(get_current_user)],
@@ -23,7 +30,9 @@ async def get_cart(
     return await PurchaseService(session).cart(user.id)
 
 
-@cart_router.post("/items/{movie_id}", status_code=status.HTTP_201_CREATED)
+@cart_router.post(
+    "/items/{movie_id}", status_code=status.HTTP_201_CREATED, responses=AUTH_RESPONSES
+)
 async def add_item(
     movie_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -35,7 +44,9 @@ async def add_item(
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
-@cart_router.delete("/items/{movie_id}", status_code=status.HTTP_204_NO_CONTENT)
+@cart_router.delete(
+    "/items/{movie_id}", status_code=status.HTTP_204_NO_CONTENT, responses=AUTH_RESPONSES
+)
 async def remove_item(
     movie_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -47,7 +58,7 @@ async def remove_item(
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
-@cart_router.delete("", status_code=status.HTTP_204_NO_CONTENT)
+@cart_router.delete("", status_code=status.HTTP_204_NO_CONTENT, responses=AUTH_RESPONSES)
 async def clear_cart(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(get_current_user)],
@@ -55,7 +66,12 @@ async def clear_cart(
     await PurchaseService(session).clear_cart(user.id)
 
 
-@order_router.post("", response_model=OrderCreationResponse, status_code=status.HTTP_201_CREATED)
+@order_router.post(
+    "",
+    response_model=OrderCreationResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses=AUTH_RESPONSES,
+)
 async def create_order(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(get_current_user)],
@@ -66,7 +82,7 @@ async def create_order(
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
-@order_router.get("", response_model=list[OrderResponse])
+@order_router.get("", response_model=list[OrderResponse], responses={401: AUTH_RESPONSES[401]})
 async def list_orders(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(get_current_user)],
@@ -74,7 +90,7 @@ async def list_orders(
     return await PurchaseService(session).orders(user.id)
 
 
-@order_router.get("/{order_id}", response_model=OrderResponse)
+@order_router.get("/{order_id}", response_model=OrderResponse, responses=AUTH_RESPONSES)
 async def get_order(
     order_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -86,7 +102,7 @@ async def get_order(
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
-@order_router.post("/{order_id}/cancel")
+@order_router.post("/{order_id}/cancel", responses=AUTH_RESPONSES)
 async def cancel_order(
     order_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],

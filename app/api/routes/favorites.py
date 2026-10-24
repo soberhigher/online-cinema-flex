@@ -17,7 +17,16 @@ from app.services.catalog import CatalogService
 router = APIRouter(prefix="/api/v1/favorites", tags=["favorites"])
 
 
-@router.post("/{movie_id}", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/{movie_id}",
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        401: {"description": "Authentication required"},
+        404: {"description": "Movie not found"},
+        409: {"description": "Already in favorites"},
+        422: {"description": "Request validation failed"},
+    },
+)
 async def add_favorite(
     movie_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -40,7 +49,15 @@ async def add_favorite(
     return {"message": "Added to favorites"}
 
 
-@router.delete("/{movie_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{movie_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        401: {"description": "Authentication required"},
+        404: {"description": "Favorite not found"},
+        422: {"description": "Request validation failed"},
+    },
+)
 async def remove_favorite(
     movie_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -55,7 +72,14 @@ async def remove_favorite(
     await session.commit()
 
 
-@router.get("", response_model=MoviePage)
+@router.get(
+    "",
+    response_model=MoviePage,
+    responses={
+        401: {"description": "Authentication required"},
+        422: {"description": "Request validation failed"},
+    },
+)
 async def favorites(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(get_current_user)],

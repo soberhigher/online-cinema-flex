@@ -60,7 +60,7 @@ Configure only Stripe test-mode credentials. Start a local forwarding listener, 
 stripe listen --forward-to localhost:8000/api/v1/payments/webhook
 ```
 
-Set `STRIPE_WEBHOOK_SECRET` to the listener's signing secret. Create an order, call `POST /api/v1/payments/checkout/{order_id}`, then complete/cancel Checkout in Stripe's test environment. The webhook verifies the raw-body signature, checks order owner/amount, and processes duplicate events idempotently. Automated tests mock only Checkout session creation; webhook signing and database transitions are exercised against PostgreSQL. No real card charges are used.
+Set `STRIPE_WEBHOOK_SECRET` to the listener's signing secret. Checkout uses Stripe's card payment method. Create an order, call `POST /api/v1/payments/checkout/{order_id}`, then complete/cancel Checkout in Stripe's test environment. The webhook verifies the raw-body signature, checks order owner/amount, and processes duplicate events idempotently. If Stripe reports `checkout.session.completed` while `payment_status` is still `unpaid`, the order remains pending until an `async_payment_succeeded` event arrives. Automated tests mock Checkout session creation; signed webhook transitions and failure boundaries run against PostgreSQL. No real card charges are used.
 
 ## Tests and quality checks
 
@@ -73,7 +73,7 @@ poetry run mypy app
 poetry run pytest --cov=app --cov-report=term-missing
 ```
 
-Integration tests use the dedicated `cinema_test` database and `TEST_DATABASE_URL` (default `postgresql+asyncpg://cinema:changeme@localhost:5432/cinema_test`). They reset only that database's `public` schema before applying migrations; do not point this variable at a database containing user data. The tests cover auth activation/resend/reset, catalog role enforcement/search, favorites, cart/order state transitions, Stripe signatures/idempotency, and migration metadata. A fresh test database is created by the CI PostgreSQL service.
+Integration tests use the dedicated `cinema_test` database and `TEST_DATABASE_URL` (default `postgresql+asyncpg://cinema:changeme@localhost:5432/cinema_test`). They reset only that database's `public` schema before applying migrations; do not point this variable at a database containing user data. Scenarios cover auth expiry/reuse and password revocation; catalog multi-field search, filters, sorting, pagination, role access and reference deletion; favorite isolation; cart/order ownership, stale prices and concurrent order creation; and Stripe signatures, wrong owner/amount, cancellation, delayed success and event idempotency. The CI PostgreSQL service provides the dedicated test database.
 
 Before running integration tests locally against the Compose database, create the dedicated test database once:
 

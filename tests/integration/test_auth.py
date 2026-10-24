@@ -7,6 +7,7 @@ import re
 import time
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -29,6 +30,7 @@ from app.models.accounts import (
     UserGroup,
     UserGroupEnum,
 )
+from app.models.catalog import Movie
 from app.models.payments import Payment
 from app.models.purchases import Cart, CartItem
 from app.tasks.auth_tasks import send_email
@@ -93,6 +95,12 @@ async def test_registration_activation_refresh_and_logout(client: AsyncClient) -
         "/api/v1/auth/register", json={"email": email, "password": password}
     )
     assert registered.status_code == 201
+    assert (
+        await client.post("/api/v1/auth/register", json={"email": email, "password": password})
+    ).status_code == 409
+    assert (
+        await client.post("/api/v1/auth/resend-activation", json={"email": "unknown@example.com"})
+    ).status_code == 200
     unactivated = await client.post(
         "/api/v1/auth/login", json={"email": email, "password": password}
     )
@@ -149,6 +157,10 @@ async def test_registration_activation_refresh_and_logout(client: AsyncClient) -
     assert (
         await client.get("/api/v1/auth/activate", params={"token": activation_token})
     ).status_code == 400
+    wrong_password = await client.post(
+        "/api/v1/auth/login", json={"email": email, "password": "WrongPassword9!"}
+    )
+    assert wrong_password.status_code == 401
 
     logged_in = await client.post("/api/v1/auth/login", json={"email": email, "password": password})
     assert logged_in.status_code == 200
@@ -179,13 +191,28 @@ async def test_registration_activation_refresh_and_logout(client: AsyncClient) -
     )
     assert expired_reset.status_code == 400
     await client.post("/api/v1/auth/forgot-password", json={"email": email})
+    first_unexpired_reset = re.search(r"Reset token: ([A-Za-z0-9_-]+)", queued_emails[-1][2])
+    assert first_unexpired_reset is not None
+    await client.post("/api/v1/auth/forgot-password", json={"email": email})
     reset_match = re.search(r"Reset token: ([A-Za-z0-9_-]+)", queued_emails[-1][2])
     assert reset_match is not None
+    assert reset_match.group(1) != first_unexpired_reset.group(1)
+    replaced_reset = await client.post(
+        "/api/v1/auth/reset-password",
+        json={"token": first_unexpired_reset.group(1), "new_password": "ChangedPassword9!"},
+    )
+    assert replaced_reset.status_code == 400
     reset = await client.post(
         "/api/v1/auth/reset-password",
         json={"token": reset_match.group(1), "new_password": "ChangedPassword9!"},
     )
     assert reset.status_code == 200
+    assert (
+        await client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": reset_match.group(1), "new_password": "AfterReset9!"},
+        )
+    ).status_code == 400
     assert (
         await client.post("/api/v1/auth/login", json={"email": email, "password": password})
     ).status_code == 401
@@ -194,6 +221,12 @@ async def test_registration_activation_refresh_and_logout(client: AsyncClient) -
     )
     assert changed_login.status_code == 200
     access = changed_login.json()["access_token"]
+    wrong_old_password = await client.post(
+        "/api/v1/auth/change-password",
+        json={"old_password": "Incorrect9!", "new_password": "AfterChange9!"},
+        headers={"Authorization": f"Bearer {access}"},
+    )
+    assert wrong_old_password.status_code == 400
     change = await client.post(
         "/api/v1/auth/change-password",
         json={"old_password": "ChangedPassword9!", "new_password": "AfterChange9!"},
@@ -229,6 +262,27 @@ def test_auth_routes_are_registered_in_openapi() -> None:
         "/api/v1/auth/reset-password",
     }
     assert expected <= set(paths)
+
+
+def test_openapi_documents_business_errors_and_catalog_parameters() -> None:
+    paths = app.openapi()["paths"]
+    expected_statuses = {
+        ("/api/v1/auth/register", "post"): {"409", "422"},
+        ("/api/v1/auth/change-password", "post"): {"400", "401", "422"},
+        ("/api/v1/catalog-admin/movies", "post"): {"401", "403", "404", "409", "422"},
+        ("/api/v1/favorites/{movie_id}", "post"): {"401", "404", "409", "422"},
+        ("/api/v1/orders", "post"): {"401", "409"},
+        ("/api/v1/payments/webhook", "post"): {"400", "409", "422"},
+    }
+    for (path, method), expected in expected_statuses.items():
+        assert expected <= set(paths[path][method]["responses"])
+    catalog = paths["/api/v1/movies/"]["get"]
+    assert {"page", "per_page", "search", "genre_id", "year", "min_imdb", "sort"} <= {
+        parameter["name"] for parameter in catalog["parameters"]
+    }
+    assert {"422"} <= set(paths["/api/v1/movies/genres"]["get"]["responses"])
+    schema = catalog["responses"]["200"]["content"]["application/json"]["schema"]
+    assert schema["$ref"].endswith("MoviePage")
 
 
 @pytest.mark.asyncio
@@ -277,6 +331,29 @@ async def test_catalog_crud_filters_and_favorites(
         headers=regular_headers,
     )
     assert denied_admin.status_code == 403
+    async with test_session_factory() as session:
+        admin_group = await session.scalar(
+            select(UserGroup).where(UserGroup.name == UserGroupEnum.ADMIN)
+        )
+        assert admin_group is not None
+        admin_user = User(
+            email="catalog-admin@example.com",
+            password_hash="unused",
+            group_id=admin_group.id,
+            is_active=True,
+        )
+        session.add(admin_user)
+        await session.commit()
+        admin_id = admin_user.id
+    admin_token, _ = create_access_token(str(admin_id), UserGroupEnum.ADMIN.value)
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+    assert (
+        await client.post(
+            "/api/v1/catalog-admin/genres",
+            json={"name": "Admin Managed"},
+            headers=admin_headers,
+        )
+    ).status_code == 201
     assert (await client.get("/docs")).status_code == 401
     assert (await client.get("/openapi.json")).status_code == 401
     docs = await client.get("/docs", headers=headers)
@@ -308,6 +385,16 @@ async def test_catalog_crud_filters_and_favorites(
         "star_ids": [],
         "director_ids": [],
     }
+    lead_star = await client.post(
+        "/api/v1/catalog-admin/stars", json={"name": "Lead Actor"}, headers=headers
+    )
+    lead_director = await client.post(
+        "/api/v1/catalog-admin/directors", json={"name": "Lead Director"}, headers=headers
+    )
+    assert lead_star.status_code == 201
+    assert lead_director.status_code == 201
+    movie_data["star_ids"] = [lead_star.json()["id"]]
+    movie_data["director_ids"] = [lead_director.json()["id"]]
     created_movie = await client.post(
         "/api/v1/catalog-admin/movies", json=movie_data, headers=headers
     )
@@ -321,6 +408,57 @@ async def test_catalog_crud_filters_and_favorites(
         "/api/v1/catalog-admin/genres", json={"name": "Unused"}, headers=headers
     )
     assert unused_genre.status_code == 201
+    temporary_genre = await client.post(
+        "/api/v1/catalog-admin/genres", json={"name": "Temporary"}, headers=headers
+    )
+    temporary_genre_id = temporary_genre.json()["id"]
+    assert (await client.get("/api/v1/catalog-admin/genres", headers=headers)).status_code == 200
+    renamed_genre = await client.put(
+        f"/api/v1/catalog-admin/genres/{temporary_genre_id}",
+        json={"name": "Temporary Renamed"},
+        headers=headers,
+    )
+    assert renamed_genre.status_code == 200
+    assert renamed_genre.json()["name"] == "Temporary Renamed"
+    assert (
+        await client.delete(f"/api/v1/catalog-admin/genres/{temporary_genre_id}", headers=headers)
+    ).status_code == 204
+    for resource, name in (("stars", "Temporary Star"), ("directors", "Temporary Director")):
+        created_reference = await client.post(
+            f"/api/v1/catalog-admin/{resource}", json={"name": name}, headers=headers
+        )
+        assert created_reference.status_code == 201
+        reference_id = created_reference.json()["id"]
+        listed_references = await client.get(f"/api/v1/catalog-admin/{resource}", headers=headers)
+        assert created_reference.json() in listed_references.json()
+        updated_reference = await client.put(
+            f"/api/v1/catalog-admin/{resource}/{reference_id}",
+            json={"name": f"{name} Renamed"},
+            headers=headers,
+        )
+        assert updated_reference.status_code == 200
+        assert (
+            await client.delete(f"/api/v1/catalog-admin/{resource}/{reference_id}", headers=headers)
+        ).status_code == 204
+    temporary_certification = await client.post(
+        "/api/v1/catalog-admin/certifications",
+        json={"name": "Temporary Cert"},
+        headers=headers,
+    )
+    temp_cert_id = temporary_certification.json()["id"]
+    listed_certifications = await client.get(
+        "/api/v1/catalog-admin/certifications", headers=headers
+    )
+    assert temporary_certification.json() in listed_certifications.json()
+    updated_certification = await client.put(
+        f"/api/v1/catalog-admin/certifications/{temp_cert_id}",
+        json={"name": "Temporary Cert Renamed"},
+        headers=headers,
+    )
+    assert updated_certification.status_code == 200
+    assert (
+        await client.delete(f"/api/v1/catalog-admin/certifications/{temp_cert_id}", headers=headers)
+    ).status_code == 204
     assert (
         await client.delete(
             f"/api/v1/catalog-admin/genres/{unused_genre.json()['id']}", headers=headers
@@ -332,24 +470,153 @@ async def test_catalog_crud_filters_and_favorites(
     assert (await client.post(f"/api/v1/favorites/{movie_id}")).status_code == 401
     duplicate = await client.post("/api/v1/catalog-admin/movies", json=movie_data, headers=headers)
     assert duplicate.status_code == 409
+    comedy_genre = await client.post(
+        "/api/v1/catalog-admin/genres", json={"name": "Comedy"}, headers=headers
+    )
+    second_star = await client.post(
+        "/api/v1/catalog-admin/stars", json={"name": "Second Actor"}, headers=headers
+    )
+    second_director = await client.post(
+        "/api/v1/catalog-admin/directors",
+        json={"name": "Second Director"},
+        headers=headers,
+    )
+    second_movie_data = dict(
+        movie_data,
+        name="Second Catalog Film",
+        year=2022,
+        price="12.50",
+        genre_ids=[comedy_genre.json()["id"]],
+        star_ids=[second_star.json()["id"]],
+        director_ids=[second_director.json()["id"]],
+    )
+    second_catalog_movie = await client.post(
+        "/api/v1/catalog-admin/movies", json=second_movie_data, headers=headers
+    )
+    assert second_catalog_movie.status_code == 201
+    assert (await client.get("/api/v1/movies/", params={"search": "Second Director"})).json()[
+        "total"
+    ] == 1
+    assert (await client.get("/api/v1/movies/", params={"search": "12.50"})).json()["total"] == 1
+    wrong_genre_year = await client.get(
+        "/api/v1/movies/",
+        params={"genre_id": genre_id, "year": 2022, "min_imdb": 8},
+    )
+    assert wrong_genre_year.status_code == 200
+    assert wrong_genre_year.json()["total"] == 0
+    catalog_page_one = await client.get(
+        "/api/v1/movies/",
+        params={"page": 1, "per_page": 1, "sort": "price", "min_imdb": 8.4},
+    )
+    catalog_page_two = await client.get(
+        "/api/v1/movies/",
+        params={"page": 2, "per_page": 1, "sort": "price", "min_imdb": 8.4},
+    )
+    assert catalog_page_one.json()["total"] == 2
+    assert catalog_page_one.json()["items"][0]["id"] == movie_id
+    assert catalog_page_two.json()["items"][0]["id"] == second_catalog_movie.json()["id"]
+    descending_page = await client.get(
+        "/api/v1/movies/",
+        params={"page": 1, "per_page": 1, "sort": "price", "descending": True, "min_imdb": 8.4},
+    )
+    assert descending_page.json()["items"][0]["id"] == second_catalog_movie.json()["id"]
     updated_data = dict(movie_data, description="Updated description")
     updated_movie = await client.put(
         f"/api/v1/catalog-admin/movies/{movie_id}", json=updated_data, headers=headers
     )
     assert updated_movie.status_code == 200
     assert updated_movie.json()["description"] == "Updated description"
+    assert (await client.get("/api/v1/movies/", params={"search": "Updated description"})).json()[
+        "total"
+    ] == 1
+    assert (await client.get("/api/v1/movies/", params={"search": "Lead Actor"})).json()[
+        "total"
+    ] == 1
+    other_favorite = await client.get("/api/v1/favorites", headers=regular_headers)
+    assert other_favorite.status_code == 200
+    assert other_favorite.json()["total"] == 0
+    assert (
+        await client.post(f"/api/v1/favorites/{movie_id}", headers=regular_headers)
+    ).status_code == 201
+    other_favorite = await client.get("/api/v1/favorites", headers=regular_headers)
+    assert other_favorite.json()["total"] == 1
+    assert other_favorite.json()["items"][0]["id"] == movie_id
+    assert (await client.get("/api/v1/cart", headers=regular_headers)).json()["total"] == "0.00"
     searched_genre = await client.get("/api/v1/movies/", params={"search": "Drama"})
     assert searched_genre.status_code == 200
     assert searched_genre.json()["total"] == 1
     searched_rating = await client.get("/api/v1/movies/", params={"search": "8.4"})
     assert searched_rating.status_code == 200
-    assert searched_rating.json()["total"] == 1
+    assert searched_rating.json()["total"] == 2
+    second_year = await client.get("/api/v1/movies/", params={"year": 2022})
+    assert [row["id"] for row in second_year.json()["items"]] == [second_catalog_movie.json()["id"]]
+    second_genre = await client.get(
+        "/api/v1/movies/", params={"genre_id": comedy_genre.json()["id"]}
+    )
+    assert [row["id"] for row in second_genre.json()["items"]] == [
+        second_catalog_movie.json()["id"]
+    ]
     filtered = await client.get(
         "/api/v1/movies/",
         params={"genre_id": genre_id, "year": 2024, "min_imdb": 8, "sort": "price"},
     )
     assert filtered.status_code == 200
     assert filtered.json()["total"] == 1
+    empty = await client.get("/api/v1/movies/", params={"search": "no-such-title"})
+    assert empty.status_code == 200
+    assert empty.json()["total"] == 0
+    assert empty.json()["items"] == []
+    assert (await client.get("/api/v1/movies/", params={"sort": "invalid"})).status_code == 422
+    assert (
+        await client.post(
+            "/api/v1/catalog-admin/movies",
+            json=dict(
+                movie_data,
+                name="Missing Certification",
+                year=2020,
+                certification_id=99999,
+            ),
+            headers=headers,
+        )
+    ).status_code == 404
+    certification = await client.post(
+        "/api/v1/catalog-admin/certifications", json={"name": "PG-13"}, headers=headers
+    )
+    assert certification.status_code == 201
+    certified_movie = await client.post(
+        "/api/v1/catalog-admin/movies",
+        json=dict(
+            movie_data,
+            name="Certified Example",
+            year=2020,
+            certification_id=certification.json()["id"],
+        ),
+        headers=headers,
+    )
+    assert certified_movie.status_code == 201
+    assert certified_movie.json()["certification_id"] == certification.json()["id"]
+    certification_rows = await client.get("/api/v1/catalog-admin/certifications", headers=headers)
+    assert certification_rows.status_code == 200
+    assert certification.json() in certification_rows.json()
+    catalog_page_one = await client.get(
+        "/api/v1/movies/", params={"page": 1, "per_page": 1, "sort": "price"}
+    )
+    catalog_page_two = await client.get(
+        "/api/v1/movies/", params={"page": 2, "per_page": 1, "sort": "price"}
+    )
+    assert catalog_page_one.json()["total"] >= 2
+    assert len(catalog_page_one.json()["items"]) == 1
+    assert catalog_page_two.json()["page"] == 2
+    assert catalog_page_one.json()["items"][0]["id"] != catalog_page_two.json()["items"][0]["id"]
+    movie_detail = await client.get(f"/api/v1/movies/{movie_id}")
+    assert movie_detail.status_code == 200
+    assert movie_detail.json()["genres"] == [{"id": genre_id, "name": "Drama"}]
+    assert (
+        await client.delete(
+            f"/api/v1/catalog-admin/certifications/{certification.json()['id']}",
+            headers=headers,
+        )
+    ).status_code == 409
     assert filtered.json()["items"][0]["id"] == movie_id
     assert (await client.get(f"/api/v1/movies/{movie_id}")).status_code == 200
     assert (await client.post(f"/api/v1/favorites/{movie_id}", headers=headers)).status_code == 201
@@ -382,6 +649,11 @@ async def test_catalog_crud_filters_and_favorites(
     assert order_data["items"][0]["price_at_order"] == "9.99"
     assert (await client.get("/api/v1/cart", headers=headers)).json()["items"] == []
     assert (await client.post(f"/api/v1/cart/items/{movie_id}", headers=headers)).status_code == 409
+    assert (
+        await client.post(f"/api/v1/orders/{order_data['id']}/cancel", headers=regular_headers)
+    ).status_code == 404
+    assert (await client.get("/api/v1/orders", headers=regular_headers)).json() == []
+    assert (await client.post("/api/v1/orders", headers=headers)).status_code == 409
     checkout_ids = iter(["cs_test_example", "cs_test_canceled", "cs_test_delayed"])
     monkeypatch.setattr(
         stripe.checkout.Session,
@@ -393,6 +665,21 @@ async def test_catalog_crud_filters_and_favorites(
     checkout = await client.post(f"/api/v1/payments/checkout/{order_data['id']}", headers=headers)
     assert checkout.status_code == 200
     assert checkout.json()["checkout_id"] == "cs_test_example"
+    async with test_session_factory() as session:
+        purchased_movie = await session.get(Movie, UUID(movie_id))
+        assert purchased_movie is not None
+        original_price = purchased_movie.price
+        purchased_movie.price = Decimal("12.99")
+        await session.commit()
+    stale_checkout = await client.post(
+        f"/api/v1/payments/checkout/{order_data['id']}", headers=headers
+    )
+    assert stale_checkout.status_code == 409
+    async with test_session_factory() as session:
+        purchased_movie = await session.get(Movie, UUID(movie_id))
+        assert purchased_movie is not None
+        purchased_movie.price = original_price
+        await session.commit()
 
     event = {
         "id": "evt_test_success",
@@ -419,13 +706,70 @@ async def test_catalog_crud_filters_and_favorites(
         headers={"Stripe-Signature": f"t={timestamp},v1=invalid"},
     )
     assert rejected_webhook.status_code == 400
+    wrong_owner_event = {
+        "id": "evt_test_wrong_owner",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_test_example",
+                "amount_total": 999,
+                "payment_status": "paid",
+                "metadata": {"order_id": order_data["id"], "user_id": str(regular_user_id)},
+            }
+        },
+    }
+    wrong_owner_payload = json.dumps(wrong_owner_event, separators=(",", ":")).encode()
+    wrong_owner_timestamp = int(time.time())
+    wrong_owner_signed = str(wrong_owner_timestamp).encode() + b"." + wrong_owner_payload
+    wrong_owner_signature = hmac.new(
+        get_settings().stripe_webhook_secret.encode(), wrong_owner_signed, hashlib.sha256
+    ).hexdigest()
+    wrong_owner = await client.post(
+        "/api/v1/payments/webhook",
+        content=wrong_owner_payload,
+        headers={"Stripe-Signature": f"t={wrong_owner_timestamp},v1={wrong_owner_signature}"},
+    )
+    assert wrong_owner.status_code == 400
+    wrong_amount_event = {
+        "id": "evt_test_wrong_amount",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_test_example",
+                "amount_total": 1,
+                "payment_status": "paid",
+                "metadata": {"order_id": order_data["id"], "user_id": str(user_id)},
+            }
+        },
+    }
+    wrong_amount_payload = json.dumps(wrong_amount_event, separators=(",", ":")).encode()
+    wrong_amount_timestamp = int(time.time())
+    wrong_amount_signed = str(wrong_amount_timestamp).encode() + b"." + wrong_amount_payload
+    wrong_amount_signature = hmac.new(
+        get_settings().stripe_webhook_secret.encode(), wrong_amount_signed, hashlib.sha256
+    ).hexdigest()
+    wrong_amount = await client.post(
+        "/api/v1/payments/webhook",
+        content=wrong_amount_payload,
+        headers={"Stripe-Signature": f"t={wrong_amount_timestamp},v1={wrong_amount_signature}"},
+    )
+    assert wrong_amount.status_code == 400
+    still_pending = await client.get(f"/api/v1/orders/{order_data['id']}", headers=headers)
+    assert still_pending.json()["status"] == "pending"
+    original_mail_delay = send_email.delay
+    send_email.delay = lambda *args: (_ for _ in ()).throw(RuntimeError("mail queue unavailable"))
     webhook = await client.post(
         "/api/v1/payments/webhook",
         content=payload,
         headers={"Stripe-Signature": signature_header},
     )
+    send_email.delay = original_mail_delay
     assert webhook.status_code == 200
     assert webhook.json()["status"] == "successful"
+    paid_after_email_failure = await client.get(
+        f"/api/v1/orders/{order_data['id']}", headers=headers
+    )
+    assert paid_after_email_failure.json()["status"] == "paid"
     paid_delete = await client.delete(f"/api/v1/catalog-admin/movies/{movie_id}", headers=headers)
     assert paid_delete.status_code == 409
     repeated = await client.post(
@@ -441,6 +785,30 @@ async def test_catalog_crud_filters_and_favorites(
     async with test_session_factory() as session:
         payment_count = await session.scalar(select(func.count()).select_from(Payment))
     assert payment_count == 1
+    repeated_success_event = dict(event, id="evt_test_success_second_delivery")
+    repeated_success_payload = json.dumps(repeated_success_event, separators=(",", ":")).encode()
+    repeated_timestamp = int(time.time())
+    repeated_signed = str(repeated_timestamp).encode() + b"." + repeated_success_payload
+    repeated_signature = hmac.new(
+        get_settings().stripe_webhook_secret.encode(), repeated_signed, hashlib.sha256
+    ).hexdigest()
+    repeated_different_event = await client.post(
+        "/api/v1/payments/webhook",
+        content=repeated_success_payload,
+        headers={"Stripe-Signature": f"t={repeated_timestamp},v1={repeated_signature}"},
+    )
+    assert repeated_different_event.status_code == 200
+    assert repeated_different_event.json()["duplicate"] is True
+    assert (await client.get(f"/api/v1/orders/{order_data['id']}", headers=headers)).json()[
+        "status"
+    ] == "paid"
+    async with test_session_factory() as session:
+        order_payment_count = await session.scalar(
+            select(func.count())
+            .select_from(Payment)
+            .where(Payment.order_id == UUID(order_data["id"]))
+        )
+    assert order_payment_count == 1
     second_movie_data = dict(movie_data, name="Canceled Example", year=2023)
     second_movie = await client.post(
         "/api/v1/catalog-admin/movies", json=second_movie_data, headers=headers

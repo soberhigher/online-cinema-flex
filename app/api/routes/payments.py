@@ -14,7 +14,16 @@ from app.services.payments import PaymentService
 router = APIRouter(prefix="/api/v1/payments", tags=["payments"])
 
 
-@router.post("/checkout/{order_id}", response_model=CheckoutResponse)
+@router.post(
+    "/checkout/{order_id}",
+    response_model=CheckoutResponse,
+    responses={
+        401: {"description": "Authentication required"},
+        404: {"description": "Order not found or not owned by caller"},
+        409: {"description": "Order is not payable or prices changed"},
+        422: {"description": "Request validation failed"},
+    },
+)
 async def checkout(
     order_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -26,7 +35,15 @@ async def checkout(
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
-@router.post("/webhook", response_model=WebhookResponse)
+@router.post(
+    "/webhook",
+    response_model=WebhookResponse,
+    responses={
+        400: {"description": "Invalid Stripe signature, payload, amount, or owner"},
+        409: {"description": "Order is no longer pending or prices changed"},
+        422: {"description": "Request validation failed"},
+    },
+)
 async def webhook(
     request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
