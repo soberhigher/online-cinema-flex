@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from decimal import Decimal
 from typing import Any
@@ -67,7 +68,8 @@ class PaymentService:
         if current_total != snapshot_total or current_total != order.total_amount:
             raise AuthError(409, "Order prices changed; create a new order")
         stripe.api_key = self.settings.stripe_secret_key
-        session = stripe.checkout.Session.create(
+        session = await asyncio.to_thread(
+            stripe.checkout.Session.create,
             payment_method_types=["card"],
             mode="payment",
             success_url=self.settings.stripe_success_url,
@@ -125,18 +127,26 @@ class PaymentService:
         )
         if order is None or order.user_id != user_id:
             raise AuthError(400, "Stripe session references an invalid order owner")
+        is_paid_event = event_type in {
+            "checkout.session.completed",
+            "checkout.session.async_payment_succeeded",
+        }
+        is_success = is_paid_event and session_data.get("payment_status") == "paid"
         if order.status != OrderStatus.PENDING:
             existing_payment = await self.session.scalar(
                 select(Payment).where(Payment.order_id == order_id)
             )
             if existing_payment is not None:
                 return {"received": True, "duplicate": True}
-            raise AuthError(409, "Order is no longer pending")
-        is_paid_event = event_type in {
-            "checkout.session.completed",
-            "checkout.session.async_payment_succeeded",
-        }
-        is_success = is_paid_event and session_data.get("payment_status") == "paid"
+            if not is_success:
+                return {"received": True, "ignored": True}
+            # The customer was charged after the order left "pending" (e.g. canceled while
+            # the Stripe page was open): honour the payment instead of dropping it.
+            logger.warning(
+                "Successful payment for %s order %s; recording it and marking paid",
+                order.status,
+                order_id,
+            )
         if is_paid_event and not is_success:
             return {"received": True, "pending": True}
         expected_cents = int(order.total_amount * 100)
@@ -156,10 +166,6 @@ class PaymentService:
             ],
         )
         if is_success:
-            current_total = sum((item.movie.price for item in order.items), Decimal("0.00"))
-            snapshot_total = sum((item.price_at_order for item in order.items), Decimal("0.00"))
-            if current_total != snapshot_total or current_total != order.total_amount:
-                raise AuthError(409, "Order prices changed; create a new order")
             order.status = OrderStatus.PAID
         else:
             order.status = OrderStatus.CANCELED
